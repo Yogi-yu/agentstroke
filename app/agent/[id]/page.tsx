@@ -16,6 +16,7 @@ import Link from "next/link";
 import CanvasView, { type CanvasHandle } from "@/components/CanvasView";
 import AgentChatPanel from "@/components/AgentChatPanel";
 import AgentCreationForm from "@/components/AgentCreationForm";
+import AgentDetailMobile from "@/components/AgentDetailMobile";
 import type { Agent, StrokeTransform } from "@/lib/types";
 import { agentRenderStyle, categoryHue, categoryLabel } from "@/lib/agents";
 import { modelSpec } from "@/lib/openrouter/models";
@@ -24,10 +25,24 @@ import { appStore, useApp } from "@/state/appStore";
 
 const ROTATE_STEP = Math.PI / 24; // 7.5° per rotate press
 
+/** null until mounted (SSR-safe), then true on ≤1024px viewports. */
+function useIsMobile(query = "(max-width: 1024px)"): boolean | null {
+  const [v, setV] = useState<boolean | null>(null);
+  useEffect(() => {
+    const mq = window.matchMedia(query);
+    const on = () => setV(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [query]);
+  return v;
+}
+
 export default function AgentDetailPage() {
   const params = useParams<{ id: string }>();
   const id = params.id;
   const router = useRouter();
+  const isMobile = useIsMobile();
   const { agents, strokes, ready, generating } = useApp();
 
   const [selectedStrokeId, setSelectedStrokeId] = useState<string | null>(null);
@@ -129,6 +144,12 @@ export default function AgentDetailPage() {
   // A missing agent is surfaced inline (info panel + creation lock), not by
   // swapping the canvas out.
   const notFound = ready && !agent;
+
+  // Responsive split: ≤1024px gets a DEDICATED full-screen interaction layout,
+  // not the desktop document grid. (null = not yet measured → render nothing to
+  // avoid a layout flash / hydration mismatch.)
+  if (isMobile === null) return <div className="detail-page" />;
+  if (isMobile) return <AgentDetailMobile id={id} />;
 
   return (
     <div className="detail-page">
