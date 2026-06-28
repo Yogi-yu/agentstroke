@@ -11,6 +11,7 @@ import {
   DEFAULT_CANVAS_TRANSFORM,
   isDefaultTransform,
   screenToWorld,
+  zoomAt,
 } from "@/store/canvasTransform";
 import { agentIndex } from "@/simulation/agentProfiles";
 
@@ -173,7 +174,11 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     return () => canvas.removeEventListener("wheel", onWheel);
   }, []);
 
-  // ---- pinch zoom via touch (Edit Mode only, if supported) ----
+  // ---- two-finger pinch + pan (touch) ----
+  // EDIT MODE  → pinch resizes the selected stroke (persists).
+  // VIEW MODE  → pinch zooms the CAMERA + two-finger drag pans it (mobile canvas
+  //              navigation). One-finger tap still selects, so this never blocks
+  //              selection. Camera view resets when entering/leaving edit mode.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -183,19 +188,25 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     const midNorm = (a: Touch, b: Touch) =>
       toNorm((a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
     const onStart = (e: TouchEvent) => {
-      if (!editRef.current || e.touches.length !== 2) return;
+      if (e.touches.length !== 2) return;
       e.preventDefault();
       lastDist = dist(e.touches[0], e.touches[1]);
       lastMid = midNorm(e.touches[0], e.touches[1]);
     };
     const onMove = (e: TouchEvent) => {
-      if (!editRef.current || e.touches.length !== 2) return;
+      if (e.touches.length !== 2) return;
       e.preventDefault();
       const d = dist(e.touches[0], e.touches[1]);
       const mid = midNorm(e.touches[0], e.touches[1]);
       if (lastDist > 0) {
-        // pinch resizes the selected stroke; midpoint drift pans the camera
-        if (selIdRef.current) scaleSelectedStroke(d / lastDist);
+        const factor = d / lastDist;
+        if (editRef.current && selIdRef.current) {
+          scaleSelectedStroke(factor); // edit: resize the stroke
+        } else {
+          // view: zoom the camera about the pinch midpoint
+          viewRef.current = zoomAt(viewRef.current, mid, viewRef.current.scale * factor);
+        }
+        // both modes: two-finger drift pans the camera
         viewRef.current = {
           scale: viewRef.current.scale,
           translateX: viewRef.current.translateX + (mid.x - lastMid.x),
@@ -453,7 +464,8 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
           width: "100%",
           height: "100%",
           cursor: editMode ? editCursor : "crosshair",
-          touchAction: editMode ? "none" : "auto",
+          // never let the browser claim canvas touches → our pinch/pan + tap work
+          touchAction: "none",
         }}
       />
       {overlay}

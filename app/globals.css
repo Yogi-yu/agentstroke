@@ -2654,3 +2654,95 @@ button {
   .sd-ad-row, .sd-modes > div { grid-template-columns: 1fr; gap: 2px; }
   .sd-attr-row { grid-template-columns: 110px 56px 1fr 14px; }
 }
+
+/* ============================================================================
+   RESPONSIVE — cross-device adaptive layout
+   ----------------------------------------------------------------------------
+   Desktop (>1024px): the 3-column layout is untouched.
+   ≤1024px (tablet + mobile): a single-view TAB system — only one panel shows at
+   a time (Strokes | Canvas | Agents), the canvas is full-bleed, no overflow.
+   ============================================================================ */
+.mobile-topbar { display: none; }
+
+@media (max-width: 1024px) {
+  /* swap desktop chrome for the mobile top bar */
+  .topbar { display: none !important; }
+  .hint { display: none; }
+  .app { overflow-x: hidden; }
+
+  .mobile-topbar {
+    display: flex;
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: 52px;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 12px;
+    z-index: 40;
+    background: rgba(8, 8, 18, 0.92);
+    border-bottom: 1px solid var(--panel-border);
+    backdrop-filter: blur(10px);
+  }
+  .mtb-brand { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .mtb-brand .brand-name {
+    font-size: calc(14px * var(--font-scale));
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mtb-mode {
+    flex: none;
+    font-size: calc(9.5px * var(--font-scale));
+    text-transform: uppercase; letter-spacing: 0.05em;
+    color: #ffd98a;
+    border: 1px solid rgba(255, 217, 138, 0.4);
+    border-radius: 6px; padding: 1px 6px;
+  }
+  .mtb-tabs {
+    display: flex; gap: 3px; flex: none;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--panel-border);
+    border-radius: 999px; padding: 3px;
+  }
+  .mtb-tab {
+    background: none; border: none; cursor: pointer;
+    padding: 6px 12px; border-radius: 999px;
+    font-size: calc(12px * var(--font-scale));
+    color: var(--muted);
+    transition: background 0.15s, color 0.15s;
+  }
+  .mtb-tab.active { background: var(--accent); color: #06060f; font-weight: 600; }
+
+  /* canvas: full-bleed behind everything (always present, never hidden) */
+  .canvas-stage { inset: 0; }
+
+  /* sidebars → single-view overlays under the top bar, one at a time */
+  .sidebar.left, .sidebar.right {
+    position: fixed;
+    top: 52px; left: 0; right: 0; bottom: 0;
+    width: auto;
+    z-index: 30;
+    background: var(--bg);
+    padding: 10px;
+    gap: 10px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    display: none;
+  }
+  .app[data-mtab="strokes"] .sidebar.left { display: flex; }
+  .app[data-mtab="agents"] .sidebar.right { display: flex; }
+  /* data-mtab="canvas" → both sidebars stay hidden → canvas visible + interactive */
+
+  /* panels size to content so the overlay scrolls naturally */
+  .sidebar .panel { height: auto; }
+  .sidebar .card-list,
+  .sidebar .econ-list,
+  .sidebar .al-list { overflow: visible; max-height: none; }
+}
+
+/* detail pages (agent / stroke): stack the 3-column grid + allow scrolling */
+@media (max-width: 1024px) {
+  .detail-page { position: static; min-height: 100vh; height: auto; overflow: visible; }
+  .detail-grid { grid-template-columns: 1fr; }
+  .detail-col { overflow: visible; }
+  .detail-canvas-col .detail-canvas { min-height: 300px; }
+}

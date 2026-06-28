@@ -29,6 +29,7 @@ export default function Home() {
     selected_agent: null,
     selected_stroke: null,
     highlighted_agent_id: null,
+    active_mobile_tab: "canvas",
   });
   // ---- edit mode state (Issue 1) ----
   const [edit, setEdit] = useState<EditModeState>({ active: false, selected_stroke_id: null });
@@ -36,6 +37,8 @@ export default function Home() {
   const canvasRef = useRef<CanvasHandle>(null);
 
   const setCinematic = (on: boolean) => setUI((s) => ({ ...s, cinematic_mode: on }));
+  const setMobileTab = (tab: UIState["active_mobile_tab"]) =>
+    setUI((s) => ({ ...s, active_mobile_tab: tab }));
 
   // selection switching is locked while editing. Selecting a stroke also
   // highlights its owning agent in the right panel (Issue 3 — agent coupling).
@@ -175,7 +178,31 @@ export default function Home() {
   const cinematic = ui.cinematic_mode;
 
   return (
-    <main className={`app${cinematic ? " cinematic" : ""}`}>
+    <main className={`app${cinematic ? " cinematic" : ""}`} data-mtab={ui.active_mobile_tab}>
+      {/* Mobile-only top bar (≤1024px): app title + mode indicator + tab switcher. */}
+      {!cinematic && (
+        <header className="mobile-topbar">
+          <div className="mtb-brand">
+            <span className="brand-mark">✦</span>
+            <span className="brand-name">Agent Stroke</span>
+            {edit.active && <span className="mtb-mode">editing</span>}
+          </div>
+          <nav className="mtb-tabs" role="tablist" aria-label="View">
+            {(["strokes", "canvas", "agents"] as const).map((tab) => (
+              <button
+                key={tab}
+                role="tab"
+                aria-selected={ui.active_mobile_tab === tab}
+                className={`mtb-tab${ui.active_mobile_tab === tab ? " active" : ""}`}
+                onClick={() => setMobileTab(tab)}
+              >
+                {tab === "strokes" ? "Strokes" : tab === "canvas" ? "Canvas" : "Agents"}
+              </button>
+            ))}
+          </nav>
+        </header>
+      )}
+
       <div className="canvas-stage">
         <CanvasView
           ref={canvasRef}

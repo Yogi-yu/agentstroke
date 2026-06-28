@@ -251,6 +251,8 @@ export interface StrokeTransform {
 // GLOBAL UI STATE (Feature 5)
 // ----------------------------------------------------------------------------
 
+export type MobileTab = "strokes" | "canvas" | "agents";
+
 export interface UIState {
   cinematic_mode: boolean;
   selected_agent: string | null;
@@ -261,6 +263,11 @@ export interface UIState {
    * view, making the stroke→agent relationship explicit.
    */
   highlighted_agent_id: string | null;
+  /**
+   * Responsive single-view selector. On small screens (≤1024px) only ONE panel
+   * is shown at a time — this picks which. Ignored on desktop (3-column layout).
+   */
+  active_mobile_tab: MobileTab;
 }
 
 /**
