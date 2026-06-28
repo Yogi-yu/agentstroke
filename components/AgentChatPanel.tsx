@@ -17,10 +17,10 @@ interface Props {
 }
 
 const QUICK_PROMPTS: ReadonlyArray<{ label: string; prompt: string }> = [
-  { label: "What's your economic function?", prompt: "What is your economic function and what real-world role do you map to?" },
-  { label: "How do you make money?", prompt: "What is your revenue impact and how do you create economic value?" },
-  { label: "What's your task domain?", prompt: "What market or domain do you operate in?" },
-  { label: "How do you generate strokes?", prompt: "How does your economic function shape the strokes you generate from A to B?" },
+  { label: "What is your purpose?", prompt: "What is your purpose?" },
+  { label: "Why did you generate this stroke?", prompt: "Why did you generate this stroke — how does your economic function shape its A→B form?" },
+  { label: "Explain your economic function", prompt: "Explain your economic function and the real-world role you map to." },
+  { label: "Describe your working behavior", prompt: "Describe your working behavior and cognitive style." },
 ];
 
 export default function AgentChatPanel({ agentId, agentName }: Props) {

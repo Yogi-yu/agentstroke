@@ -80,6 +80,13 @@ export default function Home() {
   );
   const exitEdit = useCallback(() => setEdit({ active: false, selected_stroke_id: null }), []);
 
+  // Touch-first: long-pressing a stroke enters edit mode; on mobile, jump to the
+  // Canvas tab so the user can immediately drag / pinch / rotate it.
+  const onRequestEdit = useCallback((id: string) => {
+    setUI((s) => ({ ...s, selected_stroke: id, active_mobile_tab: "canvas" }));
+    setEdit({ active: true, selected_stroke_id: id });
+  }, []);
+
   // Every edit operation (drag / rotate / keyboard) writes back immediately:
   // local mirror for live UI + server for durability across refresh (Issue 2).
   const onTransformCommit = useCallback((id: string, t: StrokeTransform) => {
@@ -213,6 +220,7 @@ export default function Home() {
           editMode={edit.active}
           onSelectStroke={setSelectedStroke}
           onTransformCommit={onTransformCommit}
+          onRequestEdit={onRequestEdit}
         />
 
         {!cinematic && (
@@ -244,6 +252,15 @@ export default function Home() {
           <button className="cinematic-exit" onClick={() => setCinematic(false)}>
             Exit Cinematic Mode
           </button>
+        )}
+
+        {/* Mobile edit bar — touch-first exit/reset while editing on the canvas. */}
+        {edit.active && (
+          <div className="mobile-edit-bar">
+            <button className="meb-btn" onClick={onResetTransform}>↺ Reset</button>
+            <span className="meb-hint">drag to move · pinch to resize / rotate</span>
+            <button className="meb-btn primary" onClick={saveAndExit}>✓ Done</button>
+          </div>
         )}
       </div>
 

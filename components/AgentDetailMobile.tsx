@@ -17,6 +17,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import CanvasView from "@/components/CanvasView";
 import AgentCreationForm from "@/components/AgentCreationForm";
+import AgentChatPanel from "@/components/AgentChatPanel";
 import type { Agent } from "@/lib/types";
 import { agentRenderStyle, categoryLabel } from "@/lib/agents";
 import { modelSpec } from "@/lib/openrouter/models";
@@ -33,6 +34,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
 
   const [infoOpen, setInfoOpen] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
   const [confirmDeleteAgent, setConfirmDeleteAgent] = useState(false);
 
   const onCreate = (from: string, to: string) => {
@@ -65,6 +67,14 @@ export default function AgentDetailMobile({ id }: { id: string }) {
             {agent ? modelSpec(agent.model).label : ready ? "agent not found" : "loading…"}
           </span>
         </div>
+        <button
+          className="adm-btn adm-info-toggle"
+          onClick={() => setChatOpen(true)}
+          disabled={!agent}
+          aria-label="Open chat"
+        >
+          💬
+        </button>
         <button
           className="adm-btn adm-info-toggle"
           onClick={() => setInfoOpen((v) => !v)}
@@ -108,6 +118,21 @@ export default function AgentDetailMobile({ id }: { id: string }) {
               onCreate={onCreate}
               onExit={() => setSheetOpen(false)}
             />
+          </div>
+        </div>
+      )}
+
+      {/* Chat sheet — agent identity chat (mobile-enabled) */}
+      {chatOpen && agent && (
+        <div className="adm-chat-overlay" onClick={() => setChatOpen(false)}>
+          <div className="adm-chat" onClick={(e) => e.stopPropagation()}>
+            <div className="adm-chat-bar">
+              <span className="adm-chat-title">Chat · {agent.name}</span>
+              <button className="adm-btn adm-chat-close" onClick={() => setChatOpen(false)} aria-label="Close chat">✕</button>
+            </div>
+            <div className="adm-chat-body">
+              <AgentChatPanel agentId={agent.id} agentName={agent.name} />
+            </div>
           </div>
         </div>
       )}

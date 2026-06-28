@@ -20,6 +20,8 @@ interface State {
   roster: AgentProfile[]; // full catalog (candidates to attract from)
   pool: AgentProfile[]; // available agents — the persistent, authoritative list
   strokes: TransitionPath[];
+  /** When each absent agent left the pool (or system start) — drives idle weighting. */
+  lastOut: Record<string, number>;
 }
 
 const g = globalThis as unknown as { __strokeState?: State };
@@ -31,9 +33,23 @@ function state(): State {
     // seed the 3 default agents; joined well in the past so they don't flag as
     // freshly-attracted in the UI.
     const pool = roster.slice(0, DEFAULT_POOL_COUNT).map((a) => ({ ...a, joined_at: now - 60_000 }));
-    g.__strokeState = { roster, pool, strokes: [] };
+    // every not-yet-present agent has been "out" since start (idle accrues).
+    const lastOut: Record<string, number> = {};
+    for (const a of roster.slice(DEFAULT_POOL_COUNT)) lastOut[a.id] = now;
+    g.__strokeState = { roster, pool, strokes: [], lastOut };
   }
   return g.__strokeState;
+}
+
+/** High-entropy [0,1) — crypto-safe where available, else Math.random fallback. */
+function cryptoRandom(): number {
+  try {
+    const buf = new Uint32Array(1);
+    (globalThis.crypto as Crypto).getRandomValues(buf);
+    return buf[0] / 4294967296;
+  } catch {
+    return Math.random();
+  }
 }
 
 // ---- agents (server-authoritative pool) ------------------------------------
@@ -54,15 +70,37 @@ export function getAgent(id: string): AgentProfile | undefined {
   return s.pool.find((a) => a.id === id) ?? s.roster.find((a) => a.id === id);
 }
 
-/** Attract one not-yet-present catalog agent into the pool. Undefined when full. */
+/**
+ * Attract one not-yet-present catalog agent into the pool — STOCHASTIC selection.
+ * ----------------------------------------------------------------------------
+ * Each candidate is scored with a weighted random:
+ *     score = cryptoRandom() * 0.6 + idle_factor * 0.4
+ * where idle_factor is how long the candidate has been out of the pool (longer
+ * idle → gently favoured). The high-entropy term dominates, so no two dispatches
+ * produce the same sequence and iteration order never decides the pick. Returns
+ * undefined when the catalog is exhausted.
+ */
 export function attractAgent(): AgentProfile | undefined {
   const s = state();
   const present = new Set(s.pool.map((a) => a.id));
   const candidates = s.roster.filter((a) => !present.has(a.id));
   if (candidates.length === 0) return undefined;
-  const pick = candidates[Math.floor(Math.random() * candidates.length)];
-  const agent: AgentProfile = { ...pick, joined_at: Date.now() };
+
+  const now = Date.now();
+  const idles = candidates.map((c) => now - (s.lastOut[c.id] ?? now));
+  const maxIdle = Math.max(1, ...idles);
+
+  let pick = candidates[0];
+  let bestScore = -Infinity;
+  candidates.forEach((c, i) => {
+    const idleFactor = idles[i] / maxIdle; // 0..1
+    const score = cryptoRandom() * 0.6 + idleFactor * 0.4;
+    if (score > bestScore) { bestScore = score; pick = c; }
+  });
+
+  const agent: AgentProfile = { ...pick, joined_at: now };
   s.pool.push(agent);
+  delete s.lastOut[pick.id]; // it's in the pool now → no longer idle/out
   return agent;
 }
 
@@ -75,6 +113,7 @@ export function removeAgent(id: string): boolean {
   const i = s.pool.findIndex((a) => a.id === id);
   if (i === -1) return false;
   s.pool.splice(i, 1);
+  s.lastOut[id] = Date.now(); // starts accruing idle for future weighting
   s.strokes = s.strokes.filter((st) => st.agent_id !== id);
   return true;
 }

@@ -39,6 +39,8 @@ interface Props {
   editMode: boolean;
   onSelectStroke: (id: string | null) => void;
   onTransformCommit: (id: string, t: StrokeTransform) => void;
+  /** Touch-first: long-pressing a stroke requests entering edit mode on it. */
+  onRequestEdit?: (id: string) => void;
 }
 
 const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
@@ -49,6 +51,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   editMode,
   onSelectStroke,
   onTransformCommit,
+  onRequestEdit,
 }: Props, ref) {
   useImperativeHandle(ref, () => ({
     resetTransform(id: string) {
@@ -81,6 +84,8 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   // forces the React overlay/indicator to reflect it after a gesture.
   const viewRef = useRef<CanvasTransformState>({ ...DEFAULT_CANVAS_TRANSFORM });
   const spaceRef = useRef<boolean>(false); // SPACE held → pan gesture armed
+  const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null); // long-press → edit
+  const longPressCleanupRef = useRef<(() => void) | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [, setTick] = useState(0); // re-render overlay during gestures
 
@@ -184,38 +189,48 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     if (!canvas) return;
     let lastDist = 0;
     let lastMid = { x: 0, y: 0 };
+    let lastAngle = 0;
     const dist = (a: Touch, b: Touch) => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    const angle = (a: Touch, b: Touch) => Math.atan2(b.clientY - a.clientY, b.clientX - a.clientX);
     const midNorm = (a: Touch, b: Touch) =>
       toNorm((a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
     const onStart = (e: TouchEvent) => {
       if (e.touches.length !== 2) return;
       e.preventDefault();
+      clearLongPress(); // a second finger cancels any pending long-press-to-edit
       lastDist = dist(e.touches[0], e.touches[1]);
       lastMid = midNorm(e.touches[0], e.touches[1]);
+      lastAngle = angle(e.touches[0], e.touches[1]);
     };
     const onMove = (e: TouchEvent) => {
       if (e.touches.length !== 2) return;
       e.preventDefault();
       const d = dist(e.touches[0], e.touches[1]);
       const mid = midNorm(e.touches[0], e.touches[1]);
+      const ang = angle(e.touches[0], e.touches[1]);
       if (lastDist > 0) {
         const factor = d / lastDist;
         if (editRef.current && selIdRef.current) {
-          scaleSelectedStroke(factor); // edit: resize the stroke
+          // EDIT: pinch resizes the stroke, two-finger twist rotates it.
+          scaleSelectedStroke(factor);
+          let dA = ang - lastAngle;
+          if (dA > Math.PI) dA -= 2 * Math.PI;
+          else if (dA < -Math.PI) dA += 2 * Math.PI;
+          rotateSelectedStroke(dA);
         } else {
-          // view: zoom the camera about the pinch midpoint
+          // VIEW: pinch zooms the camera about the midpoint; drift pans it.
           viewRef.current = zoomAt(viewRef.current, mid, viewRef.current.scale * factor);
+          viewRef.current = {
+            scale: viewRef.current.scale,
+            translateX: viewRef.current.translateX + (mid.x - lastMid.x),
+            translateY: viewRef.current.translateY + (mid.y - lastMid.y),
+          };
         }
-        // both modes: two-finger drift pans the camera
-        viewRef.current = {
-          scale: viewRef.current.scale,
-          translateX: viewRef.current.translateX + (mid.x - lastMid.x),
-          translateY: viewRef.current.translateY + (mid.y - lastMid.y),
-        };
         setTick((t) => t + 1);
       }
       lastDist = d;
       lastMid = mid;
+      lastAngle = ang;
     };
     const onEnd = (e: TouchEvent) => {
       if (e.touches.length < 2) lastDist = 0;
@@ -284,6 +299,23 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     store.updateTransform(id, next); // live geometry + GPU range
     onTransformCommit(id, next); // mirror + (debounced) persistence
     setTick((t) => t + 1);
+  };
+
+  // Rotate the selected stroke by a delta (two-finger rotate gesture), persisted.
+  const rotateSelectedStroke = (delta: number) => {
+    const id = selIdRef.current;
+    if (!id || !delta) return;
+    const store = storeRef.current;
+    const base = store.transformOf(id);
+    const next = { ...base, rotation: base.rotation + delta };
+    store.updateTransform(id, next);
+    onTransformCommit(id, next);
+    setTick((t) => t + 1);
+  };
+
+  const clearLongPress = () => {
+    if (longPressRef.current) { clearTimeout(longPressRef.current); longPressRef.current = null; }
+    if (longPressCleanupRef.current) { longPressCleanupRef.current(); longPressCleanupRef.current = null; }
   };
 
   const resetSelectedStrokeScale = () => {
@@ -370,10 +402,33 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
       return; // swallow everything else — no focus/selection leakage
     }
 
-    // Outside edit mode the view is identity, so world == screen.
+    // VIEW MODE: tap selects the stroke; a long press over it enters edit mode
+    // (touch-first). The select fires immediately so a quick tap still selects.
     const wp = toWorld(e.clientX, e.clientY);
     const hit = store.hitTest(wp.x, wp.y);
     onSelectStroke(hit);
+
+    clearLongPress();
+    if (hit && onRequestEdit) {
+      const sx = e.clientX, sy = e.clientY;
+      longPressRef.current = setTimeout(() => {
+        clearLongPress();
+        onRequestEdit(hit);
+      }, 500);
+      // any meaningful move, release, or second finger cancels the long press
+      const onMoveCancel = (ev: PointerEvent) => {
+        if (Math.hypot(ev.clientX - sx, ev.clientY - sy) > 12) clearLongPress();
+      };
+      const onEndCancel = () => clearLongPress();
+      window.addEventListener("pointermove", onMoveCancel);
+      window.addEventListener("pointerup", onEndCancel);
+      window.addEventListener("pointercancel", onEndCancel);
+      longPressCleanupRef.current = () => {
+        window.removeEventListener("pointermove", onMoveCancel);
+        window.removeEventListener("pointerup", onEndCancel);
+        window.removeEventListener("pointercancel", onEndCancel);
+      };
+    }
   };
 
   // ---- editable-node overlay (selected stroke) ----
