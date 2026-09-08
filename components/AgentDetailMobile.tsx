@@ -60,7 +60,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
 
       {/* SECTION 1 — TOP BAR (overlay; container does NOT block the canvas) */}
       <div className="adm-topbar">
-        <Link href="/" className="adm-btn adm-back" aria-label="Back to canvas">←</Link>
+        <Link href="/studio" className="adm-btn adm-back" aria-label="Back to studio">←</Link>
         <div className="adm-title">
           <span className="adm-name">{agent?.name ?? id}</span>
           <span className="adm-model">

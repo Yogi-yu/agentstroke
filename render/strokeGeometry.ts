@@ -7,7 +7,7 @@
 // GPU pick channel is needed — only a `strokeIdx` for whole-stroke glow.
 // ============================================================================
 
-export const FLOATS_PER_INSTANCE = 19;
+export const FLOATS_PER_INSTANCE = 23;
 export const STRIDE_BYTES = FLOATS_PER_INSTANCE * 4;
 
 // float offsets within one instance record (keep in sync with the shader).
@@ -21,6 +21,7 @@ export const OFF = {
   anim: 14, // vec3 phase, speed, age01
   agentIdx: 17, // float
   strokeIdx: 18, // float (whole-stroke selection key)
+  visual: 19, // vec4 widthRatio, primaryHead, headCount, brushStyle
 } as const;
 
 // Per-vertex base quad: x = along (0..1), y = across (-1..1). Two triangles.

@@ -3,6 +3,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { Agent, StrokeTransform, TransitionPath } from "@/lib/types";
 import { StrokeRenderer } from "@/render/strokeRenderer";
+import { NaturalBrushRenderer } from "@/render/naturalBrushRenderer";
 import { StrokeStore } from "@/state/strokeStore";
 import { StrokeEditor } from "@/canvas/StrokeEditor";
 import { IDENTITY_TRANSFORM } from "@/store/transformStore";
@@ -13,7 +14,6 @@ import {
   screenToWorld,
   zoomAt,
 } from "@/store/canvasTransform";
-import { agentIndex } from "@/simulation/agentProfiles";
 
 // Edit-mode "zoom" RESIZES the selected stroke (its transform.scale, about its
 // centroid) so the new size persists via the normal commit/Save & Exit pipeline
@@ -72,7 +72,9 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   }), [onTransformCommit]);
   const wrapRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const brushCanvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<StrokeRenderer | null>(null);
+  const brushRendererRef = useRef<NaturalBrushRenderer | null>(null);
   const storeRef = useRef<StrokeStore>(new StrokeStore());
   const editorRef = useRef<StrokeEditor | null>(null);
   const selIdRef = useRef<string | null>(selectedStrokeId);
@@ -86,17 +88,24 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   const spaceRef = useRef<boolean>(false); // SPACE held → pan gesture armed
   const longPressRef = useRef<ReturnType<typeof setTimeout> | null>(null); // long-press → edit
   const longPressCleanupRef = useRef<(() => void) | null>(null);
+  const pathsRef = useRef(paths);
+  const agentsRef = useRef(agents);
+  const brushDirtyRef = useRef(true);
   const [error, setError] = useState<string | null>(null);
   const [, setTick] = useState(0); // re-render overlay during gestures
 
   selIdRef.current = selectedStrokeId;
   filterAgentRef.current = filterAgentId;
   editRef.current = editMode;
+  pathsRef.current = paths;
+  agentsRef.current = agents;
 
   // mount renderer + animation loop
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    const brushCanvas = brushCanvasRef.current;
+    if (!canvas || !brushCanvas) return;
+    let disposed = false;
     let renderer: StrokeRenderer;
     try {
       renderer = new StrokeRenderer(canvas);
@@ -107,6 +116,17 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     rendererRef.current = renderer;
     editorRef.current = new StrokeEditor(storeRef.current);
 
+    void import("p5.brush/standalone")
+      .then((brush) => {
+        if (disposed) return;
+        brushRendererRef.current = new NaturalBrushRenderer(brushCanvas, brush);
+        resize();
+        brushDirtyRef.current = true;
+      })
+      .catch((e: unknown) => {
+        if (!disposed) setError(e instanceof Error ? e.message : "Natural brush renderer failed");
+      });
+
     const resize = () => {
       const parent = canvas.parentElement;
       if (!parent) return;
@@ -114,32 +134,51 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
       renderer.resize(parent.clientWidth, parent.clientHeight, dpr);
       canvas.style.width = `${parent.clientWidth}px`;
       canvas.style.height = `${parent.clientHeight}px`;
+      brushRendererRef.current?.resize(parent.clientWidth, parent.clientHeight, dpr);
+      brushDirtyRef.current = true;
     };
     const ro = new ResizeObserver(resize);
     if (canvas.parentElement) ro.observe(canvas.parentElement);
     resize();
 
-    renderer.upload(storeRef.current.data, storeRef.current.count);
+    // The original renderer now owns only the animated star field. Natural
+    // marks are drawn by p5.brush on the transparent overlay canvas.
+    renderer.upload(new Float32Array(0), 0);
     lastStructRev.current = storeRef.current.structureRevision;
 
     let raf = 0;
+    let lastBrushFrame = 0;
     const loop = (now: number) => {
       const store = storeRef.current;
       const d = store.takeDirty();
-      if (d) renderer.updateRange(d.offsetFloats, d.sub);
-      // priority: Stroke Focus > Agent Filter > Normal (resolved in shader)
-      const focusIdx = selIdRef.current ? store.strokeIdxOf(selIdRef.current) : -1;
-      const filterIdx = filterAgentRef.current ? agentIndex(filterAgentRef.current) : -1;
-      renderer.render(now, focusIdx, filterIdx, viewRef.current);
+      if (d) brushDirtyRef.current = true;
+      renderer.render(now, -1, -1, viewRef.current);
+      // The material stroke itself is alive. Re-render at a deliberately calm
+      // cadence so its spline, pressure and wetness evolve as one object.
+      if (brushRendererRef.current && (brushDirtyRef.current || now - lastBrushFrame >= 55)) {
+        brushRendererRef.current.draw(
+          now,
+          pathsRef.current,
+          agentsRef.current,
+          store,
+          selIdRef.current,
+          filterAgentRef.current,
+          viewRef.current,
+        );
+        brushDirtyRef.current = false;
+        lastBrushFrame = now;
+      }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
 
     return () => {
+      disposed = true;
       cancelAnimationFrame(raf);
       ro.disconnect();
       renderer.dispose();
       rendererRef.current = null;
+      brushRendererRef.current = null;
     };
   }, []);
 
@@ -149,7 +188,8 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     if (!renderer) return;
     const store = storeRef.current;
     store.setData(paths, agents);
-    renderer.upload(store.data, store.count);
+    renderer.upload(new Float32Array(0), 0);
+    brushDirtyRef.current = true;
     lastStructRev.current = store.structureRevision;
     setTick((t) => t + 1);
   }, [paths, agents]);
@@ -159,9 +199,14 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   useEffect(() => {
     if (!editMode) {
       viewRef.current = { ...DEFAULT_CANVAS_TRANSFORM };
+      brushDirtyRef.current = true;
       setTick((t) => t + 1);
     }
   }, [editMode]);
+
+  useEffect(() => {
+    brushDirtyRef.current = true;
+  }, [selectedStrokeId, filterAgentId]);
 
   // ---- wheel / trackpad-pinch zoom (Edit Mode only) ----
   // Resizes the SELECTED stroke (persists), rather than a throwaway camera zoom.
@@ -225,6 +270,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
             translateX: viewRef.current.translateX + (mid.x - lastMid.x),
             translateY: viewRef.current.translateY + (mid.y - lastMid.y),
           };
+          brushDirtyRef.current = true;
         }
         setTick((t) => t + 1);
       }
@@ -330,6 +376,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     }
     // also recentre the camera pan back to default
     viewRef.current = { ...DEFAULT_CANVAS_TRANSFORM };
+    brushDirtyRef.current = true;
     setTick((t) => t + 1);
   };
 
@@ -369,6 +416,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
         translateX: startView.translateX + (s.x - startScreen.x),
         translateY: startView.translateY + (s.y - startScreen.y),
       };
+      brushDirtyRef.current = true;
       setTick((t) => t + 1);
     };
     const onUp = () => {
@@ -522,6 +570,11 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
           // never let the browser claim canvas touches → our pinch/pan + tap work
           touchAction: "none",
         }}
+      />
+      <canvas
+        ref={brushCanvasRef}
+        className="natural-brush-canvas"
+        aria-hidden="true"
       />
       {overlay}
       {editMode && selectedStrokeId && (

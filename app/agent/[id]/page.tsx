@@ -154,7 +154,7 @@ export default function AgentDetailPage() {
   return (
     <div className="detail-page">
       <div className="detail-topbar">
-        <Link href="/" className="back-link">← back to canvas</Link>
+        <Link href="/studio" className="back-link">← back to studio</Link>
         <div className="detail-title">{agent?.name ?? id}</div>
         <span className="back-link">{agent ? modelSpec(agent.model).label : ""}</span>
       </div>

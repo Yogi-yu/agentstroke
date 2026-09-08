@@ -1,5 +1,5 @@
 {
-  "name": "agent-stroke-art-platform",
+  "name": "noema-platform",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -11,6 +11,7 @@
   "dependencies": {
     "next": "^16.2.9",
     "openai": "^6.45.0",
+    "p5.brush": "^2.2.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },

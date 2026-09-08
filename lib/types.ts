@@ -1,5 +1,5 @@
 // ============================================================================
-// Agent Stroke Platform — Data Model (3 independent layers).
+// Noema Agent Snapshot — Data Model (3 independent layers).
 // ============================================================================
 // The platform is a "Semantic stroke generation + agent identity visualization
 // system". Three independent layers, deliberately decoupled:
@@ -172,6 +172,57 @@ export const MOTION_MODELS: MotionModel[] = [
   "continuous", "segmented", "jitter", "wave", "burst",
 ];
 
+/** Brush-head primitives used by the moving drawing head. */
+export type BrushHeadShape = "round" | "square" | "diamond" | "triangle" | "ring" | "organic";
+export type StrokeColorMode = "monochrome" | "duotone" | "spectrum";
+export type StrokeLengthClass = "short" | "medium" | "long";
+export type BrushStrokeStyle = "hard" | "soft" | "watercolor" | "texture";
+
+/**
+ * Seven-variable visual signature. Values are canvas-relative so the same
+ * stroke keeps its identity at every screen size and pixel density.
+ */
+export interface StrokeVisualSignature {
+  version: 1;
+  /** Target travelled distance in canvas-side units: point (0) .. 21 sides. */
+  length: number;
+  /** Discrete display scale derived from length: <5 / 5–6 / >6. */
+  length_class: StrokeLengthClass;
+  /** Diameter as a canvas-side fraction, display-capped for legibility. */
+  width_ratio: number;
+  /** Intended self-crossing motifs. */
+  crossings: number;
+  /** One or more primitives composing the moving brush head. */
+  brush_heads: BrushHeadShape[];
+  /** Whole-stroke ink behaviour derived from average path intensity. */
+  brush_style: BrushStrokeStyle;
+  /** -1 = cold, 0 = neutral, +1 = warm. */
+  color_temperature: number;
+  color_mode: StrokeColorMode;
+  /** Number of evenly spaced random pigments: 1, 3 or 5. */
+  color_count: 1 | 3 | 5;
+  /** Seeded random hues in degrees; stable for this stroke. */
+  color_hues: number[];
+  hue_start: number;
+  hue_end: number;
+  /** Relative draw speed for successive phases of the line. */
+  speed_profile: number[];
+  /** Direction change at a turn: 0° .. 179° (near reversal). */
+  turn_angle_deg: number;
+  /** Number of main-path corners, strictly limited to 0..4. */
+  turn_count: number;
+  /** 0 = rounded spline, 1 = hard corner. */
+  turn_sharpness: number;
+  /** Overall travel direction derived from drift bias, in degrees. */
+  direction_angle_deg: number;
+  /** Number of continuous U-turns driven by motion variation. */
+  reversal_count: number;
+  /** Number of deliberate width transitions driven by motion stability. */
+  width_change_count: number;
+  /** Seeded pressure multipliers sampled uniformly along the stroke. */
+  width_profile: number[];
+}
+
 /** A single sampled point along an agent's A→B transition path. */
 export interface TransitionPoint {
   step: number;
@@ -229,6 +280,8 @@ export interface TransitionPath {
   motion_model?: MotionModel;
   /** Number of semantic anchors the mood restructured the path to. */
   semantic_depth?: number;
+  /** Persisted seven-variable appearance contract (legacy strokes may omit). */
+  visual_signature?: StrokeVisualSignature;
 }
 
 /** A Stroke is exactly a realized A→B transition path. */

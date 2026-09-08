@@ -31,6 +31,7 @@ import {
 import { getOpenRouter } from "@/lib/openrouter/client";
 import { modelSpec } from "@/lib/openrouter/models";
 import { agentRegion, categoryStrokeProfile } from "@/lib/agents";
+import { createVisualSignature } from "@/engine/visualSignature";
 
 /** Closest legacy MotionType label for a structural geometry mode (UI/back-compat). */
 const GEOMETRY_TO_MOTION: Record<GeometryMode, MotionType> = {
@@ -301,6 +302,14 @@ function project(
       duration_ms,
     };
   });
+  const visual_signature = createVisualSignature({
+    points,
+    mood,
+    baseHue: profile.style.hue,
+    seed: base_seed,
+    geometryMode: geometry_mode,
+    motionModel: motion_model,
+  });
 
   return {
     id: `stroke-${timestamp}-${agent.id}`,
@@ -318,6 +327,7 @@ function project(
     branching_model,
     motion_model,
     semantic_depth: n,
+    visual_signature,
   };
 }
 

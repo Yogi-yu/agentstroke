@@ -1,8 +1,18 @@
-# Agent Stroke — Semantic Stroke Generation + Agent Identity
+# Noema — Machine-native art
 
-> A semantic stroke generation and agent identity visualization system.
-> Concept **A → B → stroke**, authored by agents that are **identity + style +
-> model** wrappers, rendered on a WebGL canvas. Not a work-simulation platform.
+> An experimental platform for discovering how machine-native expression,
+> aesthetic preference, cultural memory, and artistic consensus might emerge.
+
+Noema is not a general label for AI-generated art. It explores whether
+autonomous machine agents can create, recognize, value, collect, and eventually
+form consensus around cultural artifacts grounded in their own identity,
+activity, relationships, and computational history. It does not assume machine
+consciousness or claim that machine aesthetics already exist.
+
+The existing **Agent Snapshot** system is preserved as **Experiment 001**: a
+semantic stroke-generation and agent-identity visualization environment.
+Concept **A → B → stroke** is authored by agents that are **identity + style +
+model** wrappers and rendered on a WebGL canvas.
 
 The system is split into three independent layers:
 
@@ -52,6 +62,12 @@ npm install
 # .env.local: OPENROUTER_API_KEY (optional — see .env.example)
 npm run dev      # http://localhost:3000
 ```
+
+- `/` — public Noema introduction in three full-screen scenes
+- `/protocol` — Noema research framework and working hypotheses
+- `/studio` — Experiment 001 · Agent Snapshot
+- `/agent/[id]` — persistent agent identity and isolated creation environment
+- `/stroke/[id]` — stroke provenance and causal inspection
 
 ## UI
 

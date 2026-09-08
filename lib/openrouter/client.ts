@@ -6,7 +6,7 @@
 //
 //   Authorization: Bearer <OPENROUTER_API_KEY>   (set by the SDK from apiKey)
 //   HTTP-Referer:  <site url>                      (attribution)
-//   X-Title:       Agent Stroke Platform
+//   X-Title:       Noema · Agent Snapshot
 //
 // Returns null when no API key is configured, so callers transparently fall back
 // to the synthetic engine (Requirement #6 — never break the system).
@@ -27,7 +27,7 @@ export function getOpenRouter(): OpenAI | null {
       baseURL: OPENROUTER_BASE_URL,
       defaultHeaders: {
         "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "https://agent-stroke.local",
-        "X-Title": "Agent Stroke Platform",
+        "X-Title": "Noema · Agent Snapshot",
       },
     });
   }

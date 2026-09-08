@@ -21,7 +21,9 @@ import {
   linkProgram,
 } from "./shader";
 
-const DECAY = 0.92;
+// No geometry feedback: every artwork must read as exactly one current gesture,
+// never as several historical paths. Motion remains visible through the pulse.
+const DECAY = 0;
 const CONTRIBUTION = 1 - DECAY;
 const WIDTH_SCALE = 0.7;
 
@@ -41,6 +43,7 @@ const STROKE_INSTANCE_ATTRS: InstAttr[] = [
   { loc: 7, size: 3, offsetFloats: OFF.anim },
   { loc: 8, size: 1, offsetFloats: OFF.agentIdx },
   { loc: 9, size: 1, offsetFloats: OFF.strokeIdx },
+  { loc: 10, size: 4, offsetFloats: OFF.visual },
 ];
 
 interface Uni {
@@ -266,6 +269,9 @@ export class StrokeRenderer {
     gl.drawArrays(gl.POINTS, 0, this.starCount);
 
     if (this.instanceCount > 0) {
+      // Alpha composition prevents overlapping segments and feedback trails
+      // from accumulating into an opaque white mass.
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
       gl.useProgram(this.strokeProg);
       gl.uniform2f(this.strokeUni.uResolution, w, h);
       gl.uniform1f(this.strokeUni.uTime, time);

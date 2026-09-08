@@ -21,6 +21,7 @@ layout(location=6) in vec2 aSeg;       // seg01 start,end
 layout(location=7) in vec3 aAnim;      // phase,speed,age01
 layout(location=8) in float aAgentIdx;
 layout(location=9) in float aStrokeIdx;
+layout(location=10) in vec4 aVisual;   // widthRatio, primaryHead, headCount, brushStyle
 
 uniform vec2 uResolution;
 uniform float uTime;
@@ -40,6 +41,8 @@ out float vAge;
 out float vPulse;
 out float vSel;
 out float vAgentDim;
+out vec3 vHead;
+out vec2 vSegRange;
 
 void main() {
   // Edit Mode view transform: screen = world * scale + translate. World position
@@ -55,8 +58,26 @@ void main() {
 
   // nonlinear emphasis: width = pow(raw, 1.5) * scale, with a min visible width.
   // Half-widths scale with the view so zoom reads as a true optical zoom.
-  float ewS = max(pow(aWidth.x, 1.5) * uWidthScale, 1.2);
-  float ewE = max(pow(aWidth.y, 1.5) * uWidthScale, 1.2);
+  float sideCssPx = min(uResolution.x, uResolution.y) / uDpr;
+  float signatureWidth = clamp(aVisual.x, 0.0, 0.008) * sideCssPx;
+  float displayWidth = clamp(7.0 + signatureWidth * 0.5, 7.0, 10.0);
+  float brushStyle = aVisual.w;
+  float styleWidth = brushStyle < 0.5 ? 0.72 : (brushStyle < 1.5 ? 1.0 : (brushStyle < 2.5 ? 1.28 : 1.08));
+  displayWidth *= styleWidth;
+  // Brush pressure: pointed pickup/release, semantic width variation through
+  // the body, and unequal segment endpoints instead of a uniform tube.
+  float envelopeS = pow(max(0.0, sin(3.14159265 * aSeg.x)), 0.7);
+  float envelopeE = pow(max(0.0, sin(3.14159265 * aSeg.y)), 0.7);
+  float gestureS = 0.68 + 0.32 * (0.5 + 0.5 * sin(aSeg.x * 9.42477796 + aMeta.x * 4.0));
+  float gestureE = 0.68 + 0.32 * (0.5 + 0.5 * sin(aSeg.y * 9.42477796 + aMeta.x * 4.0));
+  float pressureS = brushStyle < 0.5 ? 0.5 + envelopeS * 0.5 : (brushStyle < 1.5 ? 0.1 + envelopeS * 0.9 : (brushStyle < 2.5 ? 0.28 + envelopeS * 0.72 : (0.08 + envelopeS * 0.92) * gestureS));
+  float pressureE = brushStyle < 0.5 ? 0.5 + envelopeE * 0.5 : (brushStyle < 1.5 ? 0.1 + envelopeE * 0.9 : (brushStyle < 2.5 ? 0.28 + envelopeE * 0.72 : (0.08 + envelopeE * 0.92) * gestureE));
+  float widthSignalS = pow(clamp(aWidth.x / 6.0, 0.0, 1.0), 1.18);
+  float widthSignalE = pow(clamp(aWidth.y / 6.0, 0.0, 1.0), 1.18);
+  float semanticS = brushStyle < 0.5 ? mix(0.72, 1.15, widthSignalS) : (brushStyle < 1.5 ? mix(0.35, 1.65, widthSignalS) : (brushStyle < 2.5 ? mix(0.72, 1.38, widthSignalS) : mix(0.3, 1.8, widthSignalS)));
+  float semanticE = brushStyle < 0.5 ? mix(0.72, 1.15, widthSignalE) : (brushStyle < 1.5 ? mix(0.35, 1.65, widthSignalE) : (brushStyle < 2.5 ? mix(0.72, 1.38, widthSignalE) : mix(0.3, 1.8, widthSignalE)));
+  float ewS = clamp(displayWidth * pressureS * semanticS, 0.65, 18.0);
+  float ewE = clamp(displayWidth * pressureE * semanticE, 0.65, 18.0);
   float hwS = ewS * 0.5 * uDpr * uViewScale;
   float hwE = ewE * 0.5 * uDpr * uViewScale;
   float maxHW = max(hwS, hwE) + 6.0 * uDpr; // pad for glow + caps
@@ -75,10 +96,14 @@ void main() {
   vColor = aColor;
   vMeta = aMeta;
   vAge = aAnim.z;
+  vHead = aVisual.yzw;
+  vSegRange = aSeg;
 
   // comet pulse traveling the path — bright head + trailing tail (motion blur)
   float seg01 = mix(aSeg.x, aSeg.y, aCorner.x);
-  float head = fract(uTime * aAnim.y * 0.12 + aAnim.x);
+  // One coherent brush head per complete stroke. Segment-local speed affects
+  // deposition below, but must not create a separate head on every segment.
+  float head = fract(uTime * 0.07 + aAnim.x);
   float dist = seg01 - head;
   dist = dist - floor(dist + 0.5); // wrap to [-0.5,0.5]
   float tail = 0.18;
@@ -86,7 +111,7 @@ void main() {
   float p = (dist <= 0.0)
     ? exp(-(dist * dist) / (2.0 * tail * tail))
     : exp(-(dist * dist) / (2.0 * lead * lead));
-  vPulse = p;
+  vPulse = p * mix(0.82, 1.12, clamp(aAnim.y / 2.0, 0.0, 1.0));
 
   vSel = (uFocusStroke >= 0.0 && abs(aStrokeIdx - uFocusStroke) < 0.5) ? 1.0 : 0.0;
   vAgentDim = 1.0;
@@ -120,6 +145,8 @@ in float vAge;
 in float vPulse;
 in float vSel;
 in float vAgentDim;
+in vec3 vHead;
+in vec2 vSegRange;
 
 uniform float uContribution; // per-frame additive contribution (1 - decay)
 
@@ -129,29 +156,88 @@ void main() {
   float entropy = vMeta.x;
   float confidence = vMeta.y;
   float intensity = vMeta.z;
+  float brushStyle = vHead.z;
 
   // capsule SDF: distance from the segment core line
   float t = clamp(vLocal.x / max(vLen, 0.0001), 0.0, 1.0);
   float hw = max(mix(vHW.x, vHW.y, t), 0.5);
-  float cx = clamp(vLocal.x, 0.0, vLen);
-  float dCore = length(vec2(vLocal.x - cx, vLocal.y));
+  // Only the complete stroke owns start/end caps. Internal instanced segments
+  // meet as capless strips, preventing a row of overlapping circular blobs.
+  float capDx = 0.0;
+  if (vLocal.x < 0.0) {
+    if (vSegRange.x <= 0.0001) capDx = -vLocal.x;
+    else { capDx = -vLocal.x; if (capDx > 1.0) discard; }
+  } else if (vLocal.x > vLen) {
+    if (vSegRange.y >= 0.9999) capDx = vLocal.x - vLen;
+    else { capDx = vLocal.x - vLen; if (capDx > 1.0) discard; }
+  }
+  float dCore = length(vec2(capDx, vLocal.y));
+  // A hard nib terminates as a cut edge. The other tools retain a rounded,
+  // pressure-shaped pickup and release.
+  if (brushStyle < 0.5) {
+    if (vSegRange.x <= 0.0001 && vLocal.x < -hw * 0.12) discard;
+    if (vSegRange.y >= 0.9999 && vLocal.x > vLen + hw * 0.12) discard;
+    dCore = abs(vLocal.y);
+  }
 
   // entropy → edge softness; confidence → brightness; intensity → opacity + glow
-  float soft = 0.6 + entropy * 3.5;
-  float core = 1.0 - smoothstep(hw - soft, hw + soft * 0.5, dCore);
-  float glowR = hw + 2.0 + intensity * 11.0;
-  float glow = (1.0 - smoothstep(hw, glowR, dCore)) * (0.12 + intensity * 0.5);
+  float soft = brushStyle < 0.5
+    ? 0.16 + entropy * 0.35
+    : (brushStyle < 1.5 ? 0.75 + entropy * 1.35 : (brushStyle < 2.5 ? 1.8 + entropy * 2.3 : 0.38 + entropy * 1.15));
+  float fiberNoise = 0.5 + 0.5 * sin(vLocal.x * 0.055 + vLocal.y * 2.35 + entropy * 17.0);
+  float coarseGrain = 0.5 + 0.5 * sin(vLocal.x * 0.19 + sin(vLocal.y * 1.73) * 3.1 + intensity * 29.0);
+  float textureGain = brushStyle < 0.5 ? 0.08 : (brushStyle < 1.5 ? 0.25 : (brushStyle < 2.5 ? 0.18 : 1.0));
+  float edgeWobble = (mix(fiberNoise, coarseGrain, brushStyle > 2.5 ? 0.72 : 0.0) - 0.5)
+    * (0.35 + entropy * 1.35) * textureGain;
+  float core = 1.0 - smoothstep(hw - soft + edgeWobble, hw + soft * 0.5 + edgeWobble, dCore);
+  float glowR = hw + (brushStyle < 0.5 ? 0.35 : (brushStyle < 1.5 ? 0.9 : (brushStyle < 2.5 ? 3.4 : 0.65))) + intensity;
+  float glowStrength = brushStyle < 0.5 ? 0.012 : (brushStyle < 1.5 ? 0.045 : (brushStyle < 2.5 ? 0.16 : 0.025));
+  float glow = (1.0 - smoothstep(hw, glowR, dCore)) * glowStrength;
 
   float shape = max(core, glow * 0.7);
+
+  // Moving brush head. A stroke can combine up to three primitives; the first
+  // and second are encoded explicitly and the third becomes an organic echo.
+  float across = abs(vLocal.y) / max(hw, 0.5);
+  float primary = vHead.x;
+  float headShape = 1.0 - smoothstep(0.62, 1.12, across); // round
+  if (primary > 0.5 && primary < 1.5) headShape = 1.0 - step(1.0, across); // square
+  else if (primary > 1.5 && primary < 2.5) headShape = 1.0 - smoothstep(0.35, 1.0, across); // diamond
+  else if (primary > 2.5 && primary < 3.5) headShape = 1.0 - smoothstep(0.18, 0.92, across); // triangle
+  else if (primary > 3.5 && primary < 4.5) headShape = smoothstep(0.32, 0.55, across) * (1.0 - smoothstep(0.78, 1.0, across)); // ring
+  else if (primary > 4.5) headShape = 1.0 - smoothstep(0.55 + 0.18 * sin(vLocal.y * 1.7), 1.08, across); // organic
+  if (vHead.y > 1.5) {
+    float echo = 1.0 - smoothstep(0.2, 0.72, abs(across - 0.48));
+    headShape = max(headShape, echo * 0.7);
+  }
+  if (vHead.y > 2.5) headShape = max(headShape, (1.0 - smoothstep(0.12, 0.38, across)) * 0.8);
+  float movingHead = pow(clamp(vPulse, 0.0, 1.0), 5.0) * headShape;
+  shape = max(shape, movingHead);
   if (shape <= 0.002) discard;
 
-  float bright = 0.45 + confidence * 0.75;
-  float pulseBoost = 1.0 + vPulse * 2.6;
+  float bright = 0.52 + confidence * 0.48;
+  float pulseBoost = 1.0 + vPulse * 0.38;
   float ageFade = 0.18 + vAge * 0.82;
-  float selBoost = 1.0 + vSel * 1.1;
+  float selBoost = 1.0 + vSel * 0.32;
 
-  vec3 col = vColor * bright * pulseBoost * selBoost;
-  float alpha = shape * (0.25 + intensity * 0.75) * ageFade * vAgentDim;
+  float fiberFine = 0.5 + 0.5 * sin(vLocal.y * 6.7 - vLocal.x * 0.023 + confidence * 13.0);
+  // A continuous ink body with restrained fibre loss. Texture modulates the
+  // pigment but never splits one gesture into several parallel lines.
+  float edge01 = clamp(dCore / max(hw, 0.5), 0.0, 1.0);
+  float material = brushStyle < 0.5
+    ? 0.98
+    : (brushStyle < 1.5
+      ? 0.9 + fiberNoise * 0.1
+      : (brushStyle < 2.5
+        // Watercolour stays light through the belly and deposits pigment at
+        // both wet edges, producing a characteristic tide line.
+        ? 0.76 + smoothstep(0.48, 0.92, edge01) * 0.38
+        // A texture nib drags two scales of directional grain through the ink.
+        : 0.48 + fiberNoise * 0.24 + fiberFine * 0.12 + coarseGrain * 0.22));
+  vec3 col = vColor * material * bright * pulseBoost * selBoost;
+  // All tools share the same opacity law. Their identity comes from geometry,
+  // edge behaviour and pigment deposition—not transparency presets.
+  float alpha = shape * mix(0.88, 1.0, confidence) * ageFade * vAgentDim;
   alpha = clamp(alpha, 0.0, 1.0);
 
   // premultiplied additive, scaled by per-frame contribution so the feedback
