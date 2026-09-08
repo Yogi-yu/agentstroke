@@ -12,8 +12,10 @@
 
 import type {
   AgentProfile,
+  BranchingModel,
   GeometryMode,
   Mood,
+  MotionModel,
   MotionType,
   TransitionPath,
   TransitionPoint,
@@ -45,6 +47,16 @@ const GEOMETRY_TO_MOTION: Record<GeometryMode, MotionType> = {
 
 const TIMEOUT_MS = 15_000;
 const TARGET_STEPS = 9;
+
+const GEOMETRY_MODES: GeometryMode[] = ["linear", "curved", "spiral", "recursive", "oscillatory", "fragmented"];
+const BRANCHING_MODES: BranchingModel[] = ["none", "binary", "tree", "chaotic", "delayed"];
+const MOTION_MODELS: MotionModel[] = ["continuous", "segmented", "jitter", "wave", "burst"];
+
+function avoidPrevious<T>(selected: T, previous: T | undefined, choices: readonly T[], seed: number): T {
+  if (previous === undefined || selected !== previous) return selected;
+  const alternatives = choices.filter((choice) => choice !== previous);
+  return alternatives[seed % alternatives.length] ?? selected;
+}
 
 interface SemanticPath {
   anchors: string[];
@@ -226,6 +238,7 @@ function project(
   mood: Mood,
   timestamp: number,
   seed: number,
+  previous?: TransitionPath,
 ): TransitionPath {
   const anchors = sem.anchors;
   const n = anchors.length;
@@ -233,9 +246,12 @@ function project(
   const rng = makeRng(seed);
 
   // ---- mood selects the STRUCTURE (not appearance) ----
-  const geometry_mode = selectGeometryMode(mood, seed);
-  const branching_model = selectBranchingModel(mood, seed);
-  const motion_model = selectMotionModel(mood, seed);
+  // Adjacent-generation contrast is a hard constraint. Mood still proposes
+  // each mode, but a direct repeat is deterministically redirected to another
+  // valid mode rather than being allowed to produce the same visual grammar.
+  const geometry_mode = avoidPrevious(selectGeometryMode(mood, seed), previous?.geometry_mode, GEOMETRY_MODES, seed ^ 0x6e0a);
+  const branching_model = avoidPrevious(selectBranchingModel(mood, seed), previous?.branching_model, BRANCHING_MODES, seed ^ 0x1b7a);
+  const motion_model = avoidPrevious(selectMotionModel(mood, seed), previous?.motion_model, MOTION_MODELS, seed ^ 0x4c0d);
 
   // each agent occupies its own latent region (stable per id); the exact
   // start/end within it shift per bucket via the variation seed.
@@ -306,7 +322,9 @@ function project(
     points,
     mood,
     baseHue: profile.style.hue,
-    seed: base_seed,
+    // Palettes and pressure profiles must vary per creation. Using base_seed
+    // here made repeated A→B generations silently reuse those attributes.
+    seed,
     geometryMode: geometry_mode,
     motionModel: motion_model,
   });
@@ -322,6 +340,7 @@ function project(
     points,
     model,
     base_seed,
+    variation_seed: seed,
     mood,
     geometry_mode,
     branching_model,
@@ -347,26 +366,71 @@ export async function generateStroke(
   from: string,
   to: string,
   timestamp: number = Date.now(),
+  previous?: TransitionPath,
 ): Promise<TransitionPath> {
   // base_seed = the stable identity = the stroke_seed fed into the mood context.
   const base_seed = baseSeed(agent.id, from, to);
   // CONTINUOUS mood: unique per timestamp, derived from the full context.
-  const mood = generateMood(timestamp, agent.id, from, to, base_seed);
-  const seed = strokeVariationSeed(agent.id, from, to, timestamp, mood);
-
-  let sem: SemanticPath;
+  let baseSem: SemanticPath;
   try {
-    sem = await modelSemanticPath(agent, from, to);
+    baseSem = await modelSemanticPath(agent, from, to);
   } catch (err) {
     if (process.env.NODE_ENV !== "production") {
       console.warn(`[strokegen] ${agent.model} failed, using synthetic path:`, err instanceof Error ? err.message : err);
     }
-    sem = syntheticSemanticPath(agent, from, to);
+    baseSem = syntheticSemanticPath(agent, from, to);
   }
 
-  // SEMANTIC RESTRUCTURING — mood sets the anchor depth, then resamples the path.
-  const depth = selectSemanticDepth(mood, seed);
-  sem = restructureSemantic(sem, depth, mood, seed);
+  const family = (stroke: TransitionPath) => {
+    const signature = stroke.visual_signature;
+    if (!signature) return "legacy";
+    if (signature.crossings > 0) return "woven";
+    if (signature.reversal_count > 0) return "hairpin";
+    return `open:${stroke.geometry_mode ?? "unknown"}`;
+  };
+  const directionSector = (stroke: TransitionPath) => Math.floor((stroke.visual_signature?.direction_angle_deg ?? 0) / 45) % 8;
+  const widthTier = (stroke: TransitionPath) => {
+    const count = stroke.visual_signature?.width_change_count ?? 0;
+    return count === 0 ? 0 : count <= 3 ? 1 : 2;
+  };
+  const visualDifferenceScore = (candidate: TransitionPath) => {
+    if (!previous?.visual_signature || !candidate.visual_signature) return 99;
+    const a = candidate.visual_signature;
+    const b = previous.visual_signature;
+    return [
+      family(candidate) !== family(previous),
+      a.brush_style !== b.brush_style,
+      a.length_class !== b.length_class,
+      a.crossings !== b.crossings,
+      a.reversal_count !== b.reversal_count,
+      a.turn_count !== b.turn_count,
+      widthTier(candidate) !== widthTier(previous),
+      a.color_count !== b.color_count,
+      directionSector(candidate) !== directionSector(previous),
+    ].filter(Boolean).length;
+  };
 
-  return project(agent, sem, from, to, agent.model, base_seed, mood, timestamp, seed);
+  // The model is called once. Candidate resampling below is local and cheap:
+  // it varies mood, semantic restructuring and every derived visual attribute.
+  let best: TransitionPath | null = null;
+  let bestScore = -1;
+  for (let attempt = 0; attempt < 72; attempt++) {
+    const candidateTimestamp = timestamp + attempt;
+    const mood = generateMood(candidateTimestamp, agent.id, from, to, base_seed);
+    const seed = strokeVariationSeed(agent.id, from, to, candidateTimestamp, mood);
+    let depth = selectSemanticDepth(mood, seed);
+    if (previous?.semantic_depth === depth) depth = 4 + ((depth - 3 + (seed % 9)) % 10);
+    const sem = restructureSemantic(baseSem, depth, mood, seed);
+    const candidate = project(agent, sem, from, to, agent.model, base_seed, mood, candidateTimestamp, seed, previous);
+    const score = visualDifferenceScore(candidate);
+    if (score > bestScore) { best = candidate; bestScore = score; }
+    // All nine visible families differ, while the three structural modes and
+    // semantic depth are already individually protected inside this candidate.
+    if (score === 9) return candidate;
+  }
+
+  // Structural modes, depth and all seeded continuous profiles are guaranteed
+  // distinct even in the vanishingly unlikely event that every categorical
+  // facet cannot differ simultaneously because of a physical length gate.
+  return best!;
 }

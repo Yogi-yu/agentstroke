@@ -206,7 +206,7 @@ export function resolveVisualSignature(path: TransitionPath, baseHue = 210): Str
     points: path.points,
     mood: neutralMood,
     baseHue,
-    seed: path.base_seed ?? hashStr(path.id),
+    seed: path.variation_seed ?? path.base_seed ?? hashStr(path.id),
     geometryMode: path.geometry_mode,
     motionModel: path.motion_model,
   });
@@ -249,9 +249,11 @@ export function buildVisualPath(points: TransitionPoint[], sig: StrokeVisualSign
     };
   });
 
-  // Motion-driven reversals are macro hairpins on the same centreline. Lateral
-  // lane separation prevents the returning leg from sitting exactly on top of
-  // the outgoing leg, so a U-turn never resembles a branch.
+  // Motion-driven reversals are sampled semicircular hairpins on one ordered
+  // centreline. A former three-anchor V turn made a broad nib stamp repeatedly
+  // at one vertex, which visually resembled two branches growing from a node.
+  // The explicit arc below has degree two everywhere: enter the bend, travel
+  // around it, then leave along the next lane.
   if (sig.reversal_count > 0 && sig.crossings <= 0) {
     let span = 0;
     for (let a = 0; a < scaled.length; a++) {
@@ -265,7 +267,10 @@ export function buildVisualPath(points: TransitionPoint[], sig: StrokeVisualSign
     const nx = -uy;
     const ny = ux;
     const laneDirection = ((seed >>> 0) & 1) === 0 ? 1 : -1;
-    const laneGap = Math.min(0.055, Math.max(sig.width_ratio * 5, span * 0.12));
+    // Keep the bend wider than the rendered nib. This matters most for compact
+    // watercolor marks: a sub-nib-radius U-turn collapses into a round blot and
+    // makes its incoming/outgoing legs look like a fork.
+    const laneGap = Math.min(0.065, Math.max(0.014, sig.width_ratio * 10, span * 0.14));
     const gesture: XY[] = [{
       x: clamp(center.x - ux * span * 0.5, 0.015, 0.985),
       y: clamp(center.y - uy * span * 0.5, 0.015, 0.985),
@@ -273,11 +278,29 @@ export function buildVisualPath(points: TransitionPoint[], sig: StrokeVisualSign
     for (let leg = 0; leg <= sig.reversal_count; leg++) {
       const side = leg % 2 === 0 ? 1 : -1;
       const reach = Math.max(0.24, 0.5 - leg * 0.065) * span * side;
-      const lateral = (leg + 1) * laneGap * laneDirection;
+      const lateral = leg * laneGap * laneDirection;
       gesture.push({
         x: clamp(center.x + ux * reach + nx * lateral, 0.015, 0.985),
         y: clamp(center.y + uy * reach + ny * lateral, 0.015, 0.985),
       });
+
+      if (leg >= sig.reversal_count) continue;
+
+      const radius = laneGap * 0.5;
+      const nextLateral = (leg + 1) * laneGap * laneDirection;
+      const arcCenterLateral = (lateral + nextLateral) * 0.5;
+      const arcSamples = 7;
+      for (let sample = 1; sample <= arcSamples; sample++) {
+        const theta = -Math.PI * 0.5 + (sample / arcSamples) * Math.PI;
+        // Bulge beyond the end of the current lane, then return to the same
+        // longitudinal coordinate on the neighbouring lane.
+        const arcAlong = reach + side * Math.cos(theta) * radius;
+        const arcLateral = arcCenterLateral + Math.sin(theta) * radius * laneDirection;
+        gesture.push({
+          x: clamp(center.x + ux * arcAlong + nx * arcLateral, 0.015, 0.985),
+          y: clamp(center.y + uy * arcAlong + ny * arcLateral, 0.015, 0.985),
+        });
+      }
     }
     return gesture;
   }

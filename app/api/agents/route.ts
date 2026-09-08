@@ -2,13 +2,14 @@
 // /api/agents — the server-authoritative pool of available economic agents.
 // ----------------------------------------------------------------------------
 //   GET  → { agents, capacity }   the persistent available-agent list (load + re-sync)
-//   POST → attract one new agent into the pool → { agent, agents, capacity }
+//   POST   → attract one new agent into the pool → { agent, agents, capacity }
 //          (agent is null when the catalog is exhausted)
+//   DELETE → clear the available-agent pool; historical strokes are retained
 // The frontend never owns this list — it mirrors what these endpoints return.
 // ============================================================================
 
 import { NextResponse } from "next/server";
-import { listAgents, agentCapacity, attractAgent } from "@/lib/store";
+import { listAgents, agentCapacity, attractAgent, clearAgents } from "@/lib/store";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -20,4 +21,9 @@ export async function GET() {
 export async function POST() {
   const agent = attractAgent() ?? null; // null = catalog exhausted (pool full)
   return NextResponse.json({ agent, agents: listAgents(), capacity: agentCapacity() });
+}
+
+export async function DELETE() {
+  const agentsRemoved = clearAgents();
+  return NextResponse.json({ agentsRemoved, agents: listAgents(), capacity: agentCapacity() });
 }

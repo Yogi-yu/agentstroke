@@ -269,6 +269,8 @@ export interface TransitionPath {
    * while the realized stroke varies over time.
    */
   base_seed?: number;
+  /** Per-generation seed; unlike base_seed this changes on every creation. */
+  variation_seed?: number;
   /** The mood (time-slice modifier) this stroke was generated under. */
   mood?: Mood;
   // ---- structural modes the mood selected (Issue: structural divergence) ----

@@ -41,6 +41,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
   const { agents, strokes, funding, capacity } = useApp();
   const [now, setNow] = useState(() => Date.now());
   const [confirmDelete, setConfirmDelete] = useState<AgentProfile | null>(null);
+  const [confirmClearAgents, setConfirmClearAgents] = useState(false);
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
 
   // 1s heartbeat so idle times + the "attracted" window stay live.
@@ -96,7 +97,16 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
     <div className="panel econ-panel">
       <div className="panel-head">
         <h2>Agents available</h2>
-        <span className="muted">{agents.length} agents</span>
+        <div className="econ-head-actions">
+          <span className="muted">{agents.length} agents</span>
+          <button
+            className="econ-clear-agents"
+            disabled={disabled || agents.length === 0}
+            onClick={() => setConfirmClearAgents(true)}
+          >
+            Clear all
+          </button>
+        </div>
       </div>
 
       {/* Task bounty — posts a creative task that attracts more economic agents. */}
@@ -240,6 +250,26 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
                 onClick={() => { void appStore.deleteAgent(confirmDelete.id); setConfirmDelete(null); }}
               >
                 Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmClearAgents && (
+        <div className="modal-overlay" onClick={() => setConfirmClearAgents(false)}>
+          <div className="modal" role="dialog" aria-modal="true" aria-labelledby="clear-agents-title" onClick={(e) => e.stopPropagation()}>
+            <h3 id="clear-agents-title" className="modal-title">Clear all agents?</h3>
+            <p className="modal-body">
+              This removes all <b>{agents.length}</b> agents from the available pool. Historical strokes stay on the canvas with their original provenance, and agents can be attracted again later.
+            </p>
+            <div className="modal-actions">
+              <button className="mini" onClick={() => setConfirmClearAgents(false)}>Cancel</button>
+              <button
+                className="mini reject danger"
+                onClick={() => { void appStore.clearAgents(); setConfirmClearAgents(false); }}
+              >
+                Clear all agents
               </button>
             </div>
           </div>

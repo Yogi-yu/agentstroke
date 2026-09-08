@@ -160,6 +160,21 @@ class AppStore {
     this.emit();
   }
 
+  /** Clear the available-agent pool while preserving historical strokes. */
+  async clearAgents(): Promise<void> {
+    this.stopFunding();
+    try {
+      const r = await fetch("/api/agents", { method: "DELETE" });
+      if (!r.ok) return;
+      const d = await r.json();
+      this.agents = Array.isArray(d.agents) ? d.agents : [];
+      if (typeof d.capacity === "number") this.capacity = d.capacity;
+      this.emit();
+    } catch {
+      /* Preserve the last-known server state when the request fails. */
+    }
+  }
+
   async refresh(): Promise<void> {
     try {
       const sr = await fetch("/api/strokes", { cache: "no-store" });

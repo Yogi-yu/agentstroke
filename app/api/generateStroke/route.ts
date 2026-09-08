@@ -10,7 +10,7 @@
 // ============================================================================
 
 import { NextResponse } from "next/server";
-import { listAgents, getAgent, addStroke } from "@/lib/store";
+import { listAgents, listStrokes, getAgent, addStroke } from "@/lib/store";
 import { generateStroke } from "@/lib/strokegen";
 import { hashStr } from "@/simulation/rng";
 
@@ -48,7 +48,9 @@ export async function POST(req: Request) {
       ? body.timestamp
       : Date.now();
 
-  const stroke = await generateStroke(agent, from, to, timestamp);
+  const existing = listStrokes();
+  const previous = existing[existing.length - 1];
+  const stroke = await generateStroke(agent, from, to, timestamp, previous);
   addStroke(stroke);
   return NextResponse.json({ stroke });
 }

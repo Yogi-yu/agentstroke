@@ -118,6 +118,20 @@ export function removeAgent(id: string): boolean {
   return true;
 }
 
+/**
+ * Remove every currently available agent while preserving historical strokes.
+ * The immutable roster remains intact, so creative tasks can attract agents
+ * again without destroying artwork provenance.
+ */
+export function clearAgents(): number {
+  const s = state();
+  const now = Date.now();
+  const removed = s.pool.length;
+  for (const agent of s.pool) s.lastOut[agent.id] = now;
+  s.pool.length = 0;
+  return removed;
+}
+
 // ---- strokes ---------------------------------------------------------------
 
 export function listStrokes(): TransitionPath[] {

@@ -2254,6 +2254,30 @@ body:has(.sa-home) {
   flex-direction: column;
   min-height: 0;
 }
+.econ-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.econ-clear-agents {
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 120, 160, 0.35);
+  border-radius: 7px;
+  background: rgba(255, 120, 160, 0.08);
+  color: #ffc0d5;
+  font: inherit;
+  font-size: calc(11px * var(--font-scale));
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
+}
+.econ-clear-agents:hover:not(:disabled) {
+  background: rgba(255, 120, 160, 0.2);
+  border-color: rgba(255, 120, 160, 0.58);
+}
+.econ-clear-agents:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
 
 /* ---- task bounty (post a creative task) ---- */
 .econ-task {
