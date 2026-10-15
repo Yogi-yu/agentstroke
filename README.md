@@ -69,6 +69,35 @@ npm run dev      # http://localhost:3000
 - `/agent/[id]` — persistent agent identity and isolated creation environment
 - `/stroke/[id]` — stroke provenance and causal inspection
 
+## Published canvas and hosting
+
+`data/published-canvas.json` is the reviewed public canvas captured on October 15,
+2026: 23 available agent profiles, the 10 existing strokes, and their completed
+Sky batch. It preserves the original IDs, authors, semantic points, timestamps,
+seeds, visual signatures, and any saved edit transforms. It contains no provider
+credentials, chat history, or private environment configuration. The default
+animated trail retention remains 20%.
+
+On a **new server process**, `lib/publishedCanvas.ts` creates fresh deep copies for
+the server stores. The Studio canvas initially shows this published artwork;
+the Sky API also retains the completed batch for request recovery. A fresh visit
+to `/sky` still starts with its generation controls and does not automatically
+import the previous batch. Existing in-process state is never overwritten, and
+clearing the canvas does not reload the snapshot on refresh or hot reload.
+
+This is a **release seed, not durable runtime storage**. New generations, edits,
+deletions, and attracted agents live only in that Node process; restarting or
+redeploying restores the bundled release snapshot. Run a single long-lived Node
+instance (`npm run build` then `npm start`) for a coherent live canvas. Multiple
+instances or serverless route workers do not share these in-memory globals;
+durable production or serverless hosting requires a shared database/job store
+before mutable generation can be relied on across workers or cold starts.
+
+Configure `OPENROUTER_API_KEY` through the hosting provider's secret environment
+settings, never in Git. Existing artwork is viewable without it; model-backed
+generation and chat require the configured provider. The snapshot does not
+replace or migrate any separately deployed database.
+
 ## UI
 
 - **Center — Canvas:** renders every generated A→B stroke. Click a stroke to focus

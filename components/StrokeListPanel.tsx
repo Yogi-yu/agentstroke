@@ -9,10 +9,11 @@
 // triggers GLOBAL stroke removal (store + server + canvas) via a confirm modal.
 // ============================================================================
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import Link from "next/link";
 import type { AgentProfile, TransitionPath } from "@/lib/types";
 import { categoryHue } from "@/lib/agents";
+import { orderStrokesForList } from "@/lib/strokeListOrder";
 
 interface Props {
   strokes: TransitionPath[];
@@ -39,12 +40,19 @@ export default function StrokeListPanel({
   onDelete,
   onClear,
 }: Props) {
+  const listRef = useRef<HTMLDivElement>(null);
   const nameById = useMemo(() => new Map(agents.map((a) => [a.id, a.name])), [agents]);
   const catById = useMemo(() => new Map(agents.map((a) => [a.id, a.category])), [agents]);
   const ordered = useMemo(
-    () => strokes.slice().sort((a, b) => b.created_at - a.created_at),
-    [strokes],
+    () => orderStrokesForList(strokes, selectedStrokeId),
+    [strokes, selectedStrokeId],
   );
+  const hasSelection = !!selectedStrokeId && ordered[0]?.id === selectedStrokeId;
+  useEffect(() => {
+    // Reveal the pinned card without moving the page, canvas or mobile tabs.
+    // Data refreshes with the same selection must not reset manual scrolling.
+    if (hasSelection && listRef.current) listRef.current.scrollTop = 0;
+  }, [selectedStrokeId, hasSelection]);
 
   return (
     <div className="panel stroke-list">
@@ -62,7 +70,7 @@ export default function StrokeListPanel({
           </button>
         </div>
       </div>
-      <div className="card-list">
+      <div className="card-list" ref={listRef}>
         {ordered.length === 0 && (
           <div className="cards-empty">
             No strokes yet. Open an economic agent and enter creation mode (A → B).
@@ -75,6 +83,7 @@ export default function StrokeListPanel({
           return (
             <div
               key={s.id}
+              data-stroke-id={s.id}
               className={`stroke-card${sel ? " selected" : ""}${locked ? " locked" : ""}`}
               onClick={() => !locked && onSelect(sel ? null : s.id)}
             >
@@ -95,7 +104,7 @@ export default function StrokeListPanel({
                 <span>{s.motion_type}</span>
                 <span>{s.points.length} pts</span>
               </div>
-              <div className="sc-time">{new Date(s.created_at).toLocaleTimeString()}</div>
+              <div className="sc-time">{new Date(s.created_at).toLocaleTimeString("en-US", { hour12: false })}</div>
 
               {/* Card actions — REQUIRED ORDER: View Agent → Edit → Delete (Issue 4).
                   "View Agent" is the core navigation element to /agent/:id. */}

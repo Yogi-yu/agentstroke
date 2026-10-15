@@ -46,6 +46,7 @@ export function buildChatMessages(
     "grounded in your ECONOMIC FUNCTION. You exist to produce real economic value. You also",
     "generate A→B strokes whose shape reflects your economic function. Speak in the first",
     "person, stay in character, and keep answers concise.",
+    "Respond only in English, even when the user's message or previous chat is in another language.",
     "",
     "=== YOUR ECONOMIC IDENTITY ===",
     `category: ${agent.category}`,

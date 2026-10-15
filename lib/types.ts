@@ -177,6 +177,8 @@ export type BrushHeadShape = "round" | "square" | "diamond" | "triangle" | "ring
 export type StrokeColorMode = "monochrome" | "duotone" | "spectrum";
 export type StrokeLengthClass = "short" | "medium" | "long";
 export type BrushStrokeStyle = "hard" | "soft" | "watercolor" | "texture";
+/** Six complete, continuous centreline grammars selected by geometry_mode. */
+export type StrokeMotionPattern = "glide" | "arc" | "wave" | "fold" | "orbit" | "wander";
 
 /**
  * Seven-variable visual signature. Values are canvas-relative so the same
@@ -190,8 +192,16 @@ export interface StrokeVisualSignature {
   length_class: StrokeLengthClass;
   /** Diameter as a canvas-side fraction, display-capped for legibility. */
   width_ratio: number;
-  /** Intended self-crossing motifs. */
+  /** Maximum permitted self-crossings; a motion grammar may use fewer. */
   crossings: number;
+  /** Attribute-led motion grammar. Optional only for legacy signatures. */
+  motion_pattern?: StrokeMotionPattern;
+  /** Entropy/confidence-led lateral movement amplitude, 0..1. */
+  motion_amplitude?: number;
+  /** Signed curvature bias; controls bend/winding direction. */
+  motion_curvature?: number;
+  /** Per-creation deterministic motion variation seed. */
+  motion_seed?: number;
   /** One or more primitives composing the moving brush head. */
   brush_heads: BrushHeadShape[];
   /** Whole-stroke ink behaviour derived from average path intensity. */

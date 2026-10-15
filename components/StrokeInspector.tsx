@@ -117,7 +117,7 @@ export default function StrokeInspector({
 
         <div className="insp-foot">
           <code>{stroke.id}</code>
-          <time>{new Date(stroke.created_at).toLocaleTimeString()}</time>
+          <time>{new Date(stroke.created_at).toLocaleTimeString("en-US", { hour12: false })}</time>
         </div>
       </div>
     </div>

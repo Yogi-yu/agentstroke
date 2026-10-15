@@ -17,6 +17,7 @@ import CanvasView, { type CanvasHandle } from "@/components/CanvasView";
 import AgentChatPanel from "@/components/AgentChatPanel";
 import AgentCreationForm from "@/components/AgentCreationForm";
 import AgentDetailMobile from "@/components/AgentDetailMobile";
+import StrokePlayerPanel from "@/components/StrokePlayerPanel";
 import type { Agent, StrokeTransform } from "@/lib/types";
 import { agentRenderStyle, categoryHue, categoryLabel } from "@/lib/agents";
 import { modelSpec } from "@/lib/openrouter/models";
@@ -46,12 +47,15 @@ export default function AgentDetailPage() {
   const { agents, strokes, ready, generating } = useApp();
 
   const [selectedStrokeId, setSelectedStrokeId] = useState<string | null>(null);
+  const [previewStrokeId, setPreviewStrokeId] = useState<string | null>(null);
   const [editActive, setEditActive] = useState(false);
   const [transforms, setTransforms] = useState<Record<string, StrokeTransform>>({});
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmDeleteAgent, setConfirmDeleteAgent] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const canvasRef = useRef<CanvasHandle>(null);
+  const canvasColumnRef = useRef<HTMLElement>(null);
+  const playerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     appStore.bootstrap();
@@ -61,6 +65,7 @@ export default function AgentDetailPage() {
 
   const agent = useMemo(() => agents.find((a) => a.id === id) ?? null, [agents, id]);
   const agentStrokes = useMemo(() => strokes.filter((s) => s.agent_id === id), [strokes, id]);
+  const previewStroke = useMemo(() => agentStrokes.find((stroke) => stroke.id === previewStrokeId) ?? null, [agentStrokes, previewStrokeId]);
   const renderAgents = useMemo<Agent[]>(
     () => (agent ? [{ id: agent.id, style: agentRenderStyle(agent.category) }] : []),
     [agent],
@@ -71,14 +76,33 @@ export default function AgentDetailPage() {
     (sid: string | null) => {
       if (editActive) return;
       setSelectedStrokeId(sid);
+      setPreviewStrokeId(sid);
     },
     [editActive],
   );
 
+  useEffect(() => {
+    setSelectedStrokeId(null);
+    setPreviewStrokeId(null);
+    setEditActive(false);
+  }, [id]);
+
+  useEffect(() => {
+    if (previewStrokeId && !isMobile) playerRef.current?.scrollIntoView({ block: "start", behavior: "instant" });
+  }, [previewStrokeId, isMobile]);
+
+  const closePlayback = useCallback(() => {
+    setPreviewStrokeId(null);
+    setSelectedStrokeId(null);
+    canvasColumnRef.current?.scrollTo({ top: 0 });
+  }, []);
+
   // ---- edit mode (Issue 2) ----
   const enterEdit = useCallback((sid: string) => {
     setSelectedStrokeId(sid);
+    setPreviewStrokeId(null);
     setEditActive(true);
+    canvasColumnRef.current?.scrollTo({ top: 0 });
   }, []);
   const exitEdit = useCallback(() => setEditActive(false), []);
 
@@ -118,9 +142,10 @@ export default function AgentDetailPage() {
       setEditActive(false);
       setSelectedStrokeId(null);
     }
+    if (previewStrokeId === sid) setPreviewStrokeId(null);
     void appStore.deleteStroke(sid);
     setConfirmDeleteId(null);
-  }, [confirmDeleteId, selectedStrokeId]);
+  }, [confirmDeleteId, selectedStrokeId, previewStrokeId]);
 
   // ---- keyboard: R / Shift+R rotate, ESC exits edit ----
   useEffect(() => {
@@ -160,12 +185,25 @@ export default function AgentDetailPage() {
       </div>
 
       <div className="detail-grid">
-        {/* LEFT — purpose + workflow ONLY */}
+        {/* LEFT — stroke selection, purpose and workflow */}
         <aside className="detail-col">
           {!agent && (
             <div className="panel detail-summary">
               <div className="detail-state">{notFound ? `Agent “${id}” not found.` : "loading agent…"}</div>
             </div>
+          )}
+          {agent && (
+            <section className="panel agent-stroke-list">
+              <div className="panel-head"><h2>Strokes</h2><span className="muted">{agentStrokes.length}</span></div>
+              <div className="agent-stroke-options" aria-label="Agent strokes">
+                {agentStrokes.length ? [...agentStrokes].reverse().map((stroke) => (
+                  <button type="button" key={stroke.id} className={`agent-stroke-option${previewStrokeId === stroke.id ? " active" : ""}`} aria-pressed={previewStrokeId === stroke.id} disabled={editActive} onClick={() => onSelectStroke(stroke.id)}>
+                    <span>{stroke.from} <span aria-hidden="true">→</span> {stroke.to}</span>
+                    <small>{stroke.motion_type} · {new Date(stroke.timestamp ?? stroke.created_at).toLocaleTimeString("en-US", { hour12: false })}</small>
+                  </button>
+                )) : <p className="agent-stroke-empty">Create a stroke to watch its journey here.</p>}
+              </div>
+            </section>
           )}
           {agent && (
             <div className="panel detail-summary">
@@ -211,7 +249,7 @@ export default function AgentDetailPage() {
         </aside>
 
         {/* CENTER — the MANDATORY canvas (always mounted) + agent-context creation. */}
-        <section className="detail-canvas-col">
+        <section ref={canvasColumnRef} className={`detail-canvas-col${previewStroke ? " has-stroke-player" : ""}`}>
           <div className="detail-canvas">
             {/* StrokeCanvas is ALWAYS rendered — never gated on agent / loading /
                 edit state. Until the agent loads it simply shows an empty canvas. */}
@@ -245,7 +283,7 @@ export default function AgentDetailPage() {
                   </>
                 )}
                 {!editActive && !selectedInAgent && (
-                  <span className="detail-edit-hint">click a stroke to select · then Edit to move / rotate / delete</span>
+                  <span className="detail-edit-hint">click a stroke to watch its playback · Edit to move / rotate</span>
                 )}
               </div>
             )}
@@ -256,6 +294,21 @@ export default function AgentDetailPage() {
                 : `${agentStrokes.length} stroke(s) by this agent · style is emergent`}
             </div>
           </div>
+          {previewStroke && !editActive && (
+            <div ref={playerRef} className="agent-inline-player">
+              <StrokePlayerPanel
+                stroke={previewStroke}
+                agent={agent}
+                onClose={closePlayback}
+                strokeOptions={agentStrokes}
+                onSelectStroke={onSelectStroke}
+                actions={<>
+                  <button type="button" className="sd-playback-button" onClick={() => enterEdit(previewStroke.id)}>Edit</button>
+                  <button type="button" className="sd-playback-button" onClick={() => setConfirmDeleteId(previewStroke.id)}>Delete</button>
+                </>}
+              />
+            </div>
+          )}
           {/* Creation Panel is MANDATORY too — always present; it just locks
               until the agent resolves (creation requires a valid agent). */}
           <div className="panel detail-creation">

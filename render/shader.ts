@@ -262,7 +262,7 @@ void main() {
   clip.y = -clip.y;
   gl_Position = vec4(clip, 0.0, 1.0);
   gl_PointSize = aStar.x * uDpr;
-  vBright = aStar.y * (0.6 + 0.4 * sin(uTime * 0.0012 + aStar.z));
+  vBright = aStar.y * (0.78 + 0.22 * sin(uTime * 0.0007 + aStar.z));
 }
 `;
 
@@ -299,7 +299,11 @@ uniform sampler2D uTex;
 uniform float uScale; // decay (fade pass) or 1.0 (copy to screen)
 out vec4 frag;
 void main() {
-  vec3 c = texture(uTex, vUV).rgb * uScale;
+  vec2 skyPoint = (vUV - vec2(0.53, 0.55)) * vec2(1.0, 1.6);
+  float atmosphere = exp(-dot(skyPoint, skyPoint) * 3.5);
+  vec3 sky = mix(vec3(0.002, 0.004, 0.012), vec3(0.010, 0.020, 0.040), atmosphere);
+  // uScale is zero in the clear pass, so the atmosphere never accumulates.
+  vec3 c = (texture(uTex, vUV).rgb + sky) * uScale;
   frag = vec4(c, 1.0);
 }
 `;

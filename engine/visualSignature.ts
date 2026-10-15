@@ -1,11 +1,56 @@
 import type { GeometryMode, Mood, MotionModel, StrokeVisualSignature, TransitionPath, TransitionPoint } from "@/lib/types";
 import { hashStr } from "@/simulation/rng";
+import { buildMotionPath, MOTION_PATTERN_BY_GEOMETRY } from "./motionPattern";
 
 export interface XY { x: number; y: number }
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 const mix = (a: number, b: number, t: number) => a + (b - a) * t;
 export const DISPLAY_WIDTH_MAX_RATIO = 0.008;
+export const WIDTH_STABILITY_CONSTANT_THRESHOLD = 0.02;
+export const WIDTH_STABILITY_FREQUENT_THRESHOLD = 0.45;
+export const WIDTH_PRESSURE_MIN = 0.15;
+export const WIDTH_PRESSURE_MAX = 2.2;
+
+/** Original pacing-uniformity signal, shared with the attribute inspector. */
+export function motionStabilityFromDurations(source: readonly number[]): number {
+  if (!source.length) return 1;
+  const durations = source.map((value) => Number.isFinite(value) ? Math.max(0, value) : 0);
+  const mean = durations.reduce((sum, value) => sum + value, 0) / durations.length;
+  if (mean <= 0) return 1;
+  const variance = durations.reduce((sum, value) => sum + (value - mean) ** 2, 0) / durations.length;
+  return clamp(1 - Math.sqrt(variance) / mean, 0, 1);
+}
+
+/**
+ * Seeded press/lift extrema. No mean normalization: it previously compressed
+ * the contrast back toward an almost uniform line. Every counted transition
+ * now crosses between a fine 0.15–0.30 valley and a broad 1.85–2.20 peak.
+ */
+export function createWidthProfile(stability: number, seed: number): {
+  width_change_count: number;
+  width_profile: number[];
+} {
+  let state = ((seed || 1) ^ 0x9e3779b9) >>> 0;
+  const random = () => {
+    state = (Math.imul(state, 1103515245) + 12345) >>> 0;
+    return state / 4294967296;
+  };
+  const signal = Number.isFinite(stability) ? clamp(stability, 0, 1) : 0;
+  const width_change_count = signal < WIDTH_STABILITY_CONSTANT_THRESHOLD
+    ? 0
+    : signal < WIDTH_STABILITY_FREQUENT_THRESHOLD
+      ? 1 + Math.floor(random() * 3)
+      : 5 + Math.floor(random() * 4);
+  if (width_change_count === 0) return { width_change_count, width_profile: [1, 1] };
+  const startHigh = random() >= 0.5;
+  const width_profile = Array.from({ length: width_change_count + 1 }, (_, index) => {
+    const high = (index % 2 === 0) === startHigh;
+    const pressure = high ? 1.85 + random() * 0.35 : WIDTH_PRESSURE_MIN + random() * 0.15;
+    return Number(clamp(pressure, WIDTH_PRESSURE_MIN, WIDTH_PRESSURE_MAX).toFixed(3));
+  });
+  return { width_change_count, width_profile };
+}
 
 interface SignatureSource {
   points: TransitionPoint[];
@@ -83,46 +128,8 @@ export function createVisualSignature(source: SignatureSource): StrokeVisualSign
   };
   const color_hues = Array.from({ length: color_count }, () => Number((random01() * 360).toFixed(2)));
 
-  const durations = points.map((point) => point.duration_ms);
-  const durationMean = totalDuration / Math.max(1, durations.length);
-  const durationVariance = durations.length
-    ? durations.reduce((sum, duration) => sum + (duration - durationMean) ** 2, 0) / durations.length
-    : 0;
-  const motionStability = durationMean > 0
-    ? clamp(1 - Math.sqrt(durationVariance) / durationMean, 0, 1)
-    : 1;
-  let widthState = ((seed || 1) ^ 0x9e3779b9) >>> 0;
-  const widthRandom = () => {
-    widthState = (Math.imul(widthState, 1103515245) + 12345) >>> 0;
-    return widthState / 4294967296;
-  };
-  // A genuinely steady hand is deliberately rare. Most generated paths sit in
-  // the middle band and therefore receive a visible pressure rhythm; only the
-  // bottom tail stays mechanically uniform.
-  const width_change_count = motionStability < 0.18
-    ? 0
-    : motionStability < 0.68
-      ? 1 + Math.floor(widthRandom() * 3)
-      : 5 + Math.floor(widthRandom() * 4);
-  let width_profile = [1, 1];
-  if (width_change_count > 0) {
-    const generated: number[] = [];
-    for (let index = 0; index <= width_change_count; index++) {
-      if (index === 0) {
-        generated.push(0.52 + widthRandom() * 0.96);
-        continue;
-      }
-      const previous = generated[index - 1];
-      let next = 0.34 + widthRandom() * 1.32;
-      // Do not count tiny numerical changes as a visual transition. Alternating
-      // around the centre also permits thick -> thin -> thick sequences.
-      if (Math.abs(next - previous) < 0.46) next = previous > 1 ? 0.38 + widthRandom() * 0.24 : 1.38 + widthRandom() * 0.24;
-      generated.push(next);
-    }
-    width_profile = generated;
-    const profileMean = width_profile.reduce((sum, value) => sum + value, 0) / width_profile.length;
-    width_profile = width_profile.map((value) => Number(clamp(value / profileMean, 0.32, 1.72).toFixed(3)));
-  }
+  const motionStability = motionStabilityFromDurations(points.map((point) => point.duration_ms));
+  const { width_change_count, width_profile } = createWidthProfile(motionStability, seed);
 
   // Temperature remains explanatory metadata; actual pigment selection is the
   // seeded random palette requested by the protocol.
@@ -155,7 +162,7 @@ export function createVisualSignature(source: SignatureSource): StrokeVisualSign
   const modeHardness = motionModel === "segmented" || motionModel === "burst" ? 0.35 : 0;
   const turn_sharpness = clamp((1 - entropy) * 0.45 + modeHardness + Math.abs(mood.curvature_bias) * 0.2, 0, 1);
   // The semantic path may contain many anchors, but the visible gesture uses a
-  // modulo-five remainder so its main silhouette never exceeds four corners.
+  // modulo-four remainder so its main silhouette never exceeds four corners.
   const rawTurns = Math.max(0, points.length - 2);
   const turn_count = rawTurns === 0 ? 0 : ((rawTurns - 1) % 4) + 1;
   const direction_angle_deg = ((mood.drift_bias * 360) % 360 + 360) % 360;
@@ -171,6 +178,10 @@ export function createVisualSignature(source: SignatureSource): StrokeVisualSign
     length_class,
     width_ratio: Number(width_ratio.toFixed(5)),
     crossings,
+    motion_pattern: MOTION_PATTERN_BY_GEOMETRY[geometryMode ?? "linear"],
+    motion_amplitude: Number(clamp(entropy * 0.62 + (1 - confidence) * 0.23 + Math.abs(mood.curvature_bias) * 0.15, 0, 1).toFixed(3)),
+    motion_curvature: Number(clamp(mood.curvature_bias, -1, 1).toFixed(3)),
+    motion_seed: seed >>> 0,
     brush_heads: brush_heads.slice(0, 3),
     brush_style,
     color_temperature: Number(color_temperature.toFixed(3)),
@@ -212,162 +223,9 @@ export function resolveVisualSignature(path: TransitionPath, baseHue = 210): Str
   });
 }
 
-/**
- * Reduces the full semantic path to one readable gesture. Semantic depth still
- * controls the result, but its modulo-five remainder yields at most 4 turns.
- */
+/** Keep the public path contract while preserving the selected motion family. */
 export function buildVisualPath(points: TransitionPoint[], sig: StrokeVisualSignature, seed: number): XY[] {
-  const first = points[0] ?? { x: 0.5, y: 0.5 };
-  if (sig.length <= 0.002) return [{ x: first.x, y: first.y }, { x: first.x, y: first.y }];
-  const base = points.length > 1
-    ? points.map((p) => ({ x: clamp(p.x, 0.015, 0.985), y: clamp(p.y, 0.015, 0.985) }))
-    : [{ x: first.x, y: first.y }, { x: first.x + 0.001, y: first.y }];
-  const visiblePointCount = Math.min(base.length, sig.turn_count + 2);
-  const selected = visiblePointCount <= 2
-    ? [base[0], base[base.length - 1]]
-    : Array.from({ length: visiblePointCount }, (_, i) => {
-    const index = Math.round((i / (visiblePointCount - 1)) * (base.length - 1));
-    return base[index];
-  });
-  // 0.1 / 0.5 / 1 are category maxima, not three fixed lengths. The source
-  // length attribute chooses a continuous value inside each category range.
-  const scale = sig.length_class === "short"
-    ? clamp(sig.length / 5, 0, 1) * 0.1
-    : sig.length_class === "medium"
-      ? mix(0.1, 0.5, clamp(sig.length - 5, 0, 1))
-      : mix(0.5, 1, clamp((sig.length - 6) / 15, 0, 1));
-  const center = selected.reduce((a, p) => ({ x: a.x + p.x / selected.length, y: a.y + p.y / selected.length }), { x: 0, y: 0 });
-  const directionRadians = sig.direction_angle_deg * Math.PI / 180;
-  const cosDirection = Math.cos(directionRadians);
-  const sinDirection = Math.sin(directionRadians);
-  const scaled = selected.map((p) => {
-    const localX = (p.x - center.x) * scale;
-    const localY = (p.y - center.y) * scale;
-    return {
-      x: clamp(center.x + localX * cosDirection - localY * sinDirection, 0.015, 0.985),
-      y: clamp(center.y + localX * sinDirection + localY * cosDirection, 0.015, 0.985),
-    };
-  });
-
-  // Motion-driven reversals are sampled semicircular hairpins on one ordered
-  // centreline. A former three-anchor V turn made a broad nib stamp repeatedly
-  // at one vertex, which visually resembled two branches growing from a node.
-  // The explicit arc below has degree two everywhere: enter the bend, travel
-  // around it, then leave along the next lane.
-  if (sig.reversal_count > 0 && sig.crossings <= 0) {
-    let span = 0;
-    for (let a = 0; a < scaled.length; a++) {
-      for (let b = a + 1; b < scaled.length; b++) {
-        span = Math.max(span, Math.hypot(scaled[b].x - scaled[a].x, scaled[b].y - scaled[a].y));
-      }
-    }
-    span = Math.max(span, 0.018 + scale * 0.08);
-    const ux = Math.cos(directionRadians);
-    const uy = Math.sin(directionRadians);
-    const nx = -uy;
-    const ny = ux;
-    const laneDirection = ((seed >>> 0) & 1) === 0 ? 1 : -1;
-    // Keep the bend wider than the rendered nib. This matters most for compact
-    // watercolor marks: a sub-nib-radius U-turn collapses into a round blot and
-    // makes its incoming/outgoing legs look like a fork.
-    const laneGap = Math.min(0.065, Math.max(0.014, sig.width_ratio * 10, span * 0.14));
-    const gesture: XY[] = [{
-      x: clamp(center.x - ux * span * 0.5, 0.015, 0.985),
-      y: clamp(center.y - uy * span * 0.5, 0.015, 0.985),
-    }];
-    for (let leg = 0; leg <= sig.reversal_count; leg++) {
-      const side = leg % 2 === 0 ? 1 : -1;
-      const reach = Math.max(0.24, 0.5 - leg * 0.065) * span * side;
-      const lateral = leg * laneGap * laneDirection;
-      gesture.push({
-        x: clamp(center.x + ux * reach + nx * lateral, 0.015, 0.985),
-        y: clamp(center.y + uy * reach + ny * lateral, 0.015, 0.985),
-      });
-
-      if (leg >= sig.reversal_count) continue;
-
-      const radius = laneGap * 0.5;
-      const nextLateral = (leg + 1) * laneGap * laneDirection;
-      const arcCenterLateral = (lateral + nextLateral) * 0.5;
-      const arcSamples = 7;
-      for (let sample = 1; sample <= arcSamples; sample++) {
-        const theta = -Math.PI * 0.5 + (sample / arcSamples) * Math.PI;
-        // Bulge beyond the end of the current lane, then return to the same
-        // longitudinal coordinate on the neighbouring lane.
-        const arcAlong = reach + side * Math.cos(theta) * radius;
-        const arcLateral = arcCenterLateral + Math.sin(theta) * radius * laneDirection;
-        gesture.push({
-          x: clamp(center.x + ux * arcAlong + nx * arcLateral, 0.015, 0.985),
-          y: clamp(center.y + uy * arcAlong + ny * arcLateral, 0.015, 0.985),
-        });
-      }
-    }
-    return gesture;
-  }
-  if (sig.crossings <= 0) return scaled;
-
-  // Build one uninterrupted, forward-moving woven gesture. The curve crosses
-  // itself through prolate-cycloid back-swing; it never returns to a sequence
-  // of fixed centres, so crossings read as part of one hand motion rather than
-  // pasted figure-eight symbols.
-  const originalStart = scaled[0];
-  const originalEnd = scaled[scaled.length - 1];
-  let start = originalStart;
-  let end = originalEnd;
-  let widest = 0;
-  for (let a = 0; a < scaled.length; a++) {
-    for (let b = a + 1; b < scaled.length; b++) {
-      const distance = Math.hypot(scaled[b].x - scaled[a].x, scaled[b].y - scaled[a].y);
-      if (distance > widest) {
-        widest = distance;
-        start = scaled[a];
-        end = scaled[b];
-      }
-    }
-  }
-  // Preserve the source direction when choosing the widest axis.
-  const forward = Math.hypot(originalStart.x - start.x, originalStart.y - start.y)
-    + Math.hypot(originalEnd.x - end.x, originalEnd.y - end.y);
-  const reverse = Math.hypot(originalStart.x - end.x, originalStart.y - end.y)
-    + Math.hypot(originalEnd.x - start.x, originalEnd.y - start.y);
-  if (reverse < forward) [start, end] = [end, start];
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const rawSpan = Math.hypot(dx, dy);
-  const span = Math.max(0.018, rawSpan);
-  const ux = rawSpan > 0.00001 ? dx / rawSpan : 1;
-  const uy = rawSpan > 0.00001 ? dy / rawSpan : 0;
-  const nx = -uy;
-  const ny = ux;
-  const cellStep = span / Math.max(1, sig.crossings);
-  const alongRadius = Math.min(cellStep * 0.42, 0.07 * scale + 0.006);
-  const widthClearance = 0.009 + sig.width_ratio * 4.2;
-  const normalRadius = Math.min(
-    Math.max(widthClearance, span * (0.055 + (1 - sig.turn_sharpness) * 0.055)),
-    0.1 * scale + 0.014,
-  );
-  const crossed: XY[] = [originalStart];
-  if (Math.hypot(originalStart.x - start.x, originalStart.y - start.y) > 0.001) crossed.push(start);
-  const weaveCycles = Math.max(sig.crossings, sig.reversal_count);
-  const samples = 24 + weaveCycles * 10;
-  const phase = ((seed >>> 0) % 997) / 997 * Math.PI * 2;
-  for (let sample = 1; sample < samples; sample++) {
-    const t = sample / samples;
-    const theta = t * Math.PI * 2 * weaveCycles;
-    const envelope = Math.pow(Math.sin(Math.PI * t), 0.58);
-    const organic = 0.84 + 0.16 * Math.sin(theta * 0.47 + phase);
-    const localAlong = t * span + Math.sin(theta) * alongRadius * envelope * organic;
-    const slowDrift = Math.sin(Math.PI * t) * normalRadius * 0.18 * Math.sin(phase);
-    const localNormal = Math.cos(theta + Math.sin(theta * 0.31 + phase) * 0.16)
-      * normalRadius * envelope * organic + slowDrift;
-    crossed.push({
-      x: clamp(start.x + ux * localAlong + nx * localNormal, 0.015, 0.985),
-      y: clamp(start.y + uy * localAlong + ny * localNormal, 0.015, 0.985),
-    });
-  }
-  crossed.push(end);
-  if (Math.hypot(originalEnd.x - end.x, originalEnd.y - end.y) > 0.001) crossed.push(originalEnd);
-  return crossed;
+  return buildMotionPath(points, sig, seed).points;
 }
 
 export function pathLength(points: XY[]): number {
@@ -382,4 +240,15 @@ export function sampleProfile(profile: number[], t: number): number {
   const x = clamp(t, 0, 1) * (profile.length - 1);
   const i = Math.floor(x);
   return mix(profile[i], profile[Math.min(profile.length - 1, i + 1)], x - i);
+}
+
+/** Smooth pressure extrema without changing the independent speed profile. */
+export function sampleWidthProfile(profile: number[], t: number): number {
+  if (!profile.length) return 1;
+  if (profile.length === 1) return profile[0];
+  const x = clamp(t, 0, 1) * (profile.length - 1);
+  const index = Math.floor(x);
+  const local = x - index;
+  const eased = local * local * (3 - 2 * local);
+  return mix(profile[index], profile[Math.min(profile.length - 1, index + 1)], eased);
 }

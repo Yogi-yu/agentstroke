@@ -16,13 +16,16 @@ import Link from "next/link";
 import type { AgentProfile } from "@/lib/types";
 import { DEFAULT_REWARD_SYSTEM } from "@/lib/types";
 import { categoryHue, categoryLabel } from "@/lib/agents";
+import { orderAgentsForSelection } from "@/lib/agentListOrder";
 import { appStore, useApp } from "@/state/appStore";
 
 interface Props {
   /** Locked out while Edit Mode is active. */
   disabled?: boolean;
-  /** Agent owning the currently-selected stroke — highlighted + scrolled to. */
+  /** Agent owning the currently-selected stroke — pinned first + highlighted. */
   highlightedAgentId?: string | null;
+  /** Also reveal the author when switching between their different strokes. */
+  selectedStrokeId?: string | null;
 }
 
 const JOINING_MS = 2500; // window during which a freshly-attracted agent flags itself
@@ -37,12 +40,12 @@ function fmtIdle(ms: number): string {
   return rem ? `${m}m ${rem}s` : `${m}m`;
 }
 
-export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Props) {
+export default function EconomicAgentPanel({ disabled, highlightedAgentId, selectedStrokeId }: Props) {
   const { agents, strokes, funding, capacity } = useApp();
   const [now, setNow] = useState(() => Date.now());
   const [confirmDelete, setConfirmDelete] = useState<AgentProfile | null>(null);
   const [confirmClearAgents, setConfirmClearAgents] = useState(false);
-  const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
+  const listRef = useRef<HTMLDivElement>(null);
 
   // 1s heartbeat so idle times + the "attracted" window stay live.
   useEffect(() => {
@@ -50,11 +53,12 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
     return () => clearInterval(t);
   }, []);
 
-  // Scroll the highlighted agent (owner of the selected stroke) into view.
+  // Only reset this list when the selected stroke or author changes, never on
+  // idle ticks or data refresh. Scrolling a card can move outer containers.
   useEffect(() => {
     if (!highlightedAgentId) return;
-    cardRefs.current.get(highlightedAgentId)?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [highlightedAgentId]);
+    if (listRef.current) listRef.current.scrollTop = 0;
+  }, [highlightedAgentId, selectedStrokeId]);
 
   // Per-agent creative activity derived from the live stroke list.
   const activityById = useMemo(() => {
@@ -71,26 +75,10 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
   const remaining = Math.max(0, capacity - agents.length);
   const taskDisabled = disabled || (remaining === 0 && !funding);
 
-  // Activity-weighted ordering: contributors first, then by output, recency, category.
-  //   1. has_strokes (>0) on top   2. stroke_count desc
-  //   3. most recent activity       4. category
+  // The selected stroke's author leads; other agents keep their activity order.
   const ordered = useMemo(
-    () =>
-      [...agents].sort((a, b) => {
-        const aa = activityById.get(a.id);
-        const bb = activityById.get(b.id);
-        const ac = aa?.count ?? 0;
-        const bc = bb?.count ?? 0;
-        const aHas = ac > 0 ? 1 : 0;
-        const bHas = bc > 0 ? 1 : 0;
-        if (aHas !== bHas) return bHas - aHas; // P1: any strokes → top
-        if (ac !== bc) return bc - ac; // P2: stroke_count desc
-        const al = aa?.last ?? a.joined_at ?? 0;
-        const bl = bb?.last ?? b.joined_at ?? 0;
-        if (al !== bl) return bl - al; // P3: recent activity first
-        return a.category.localeCompare(b.category); // P4: category
-      }),
-    [agents, activityById],
+    () => orderAgentsForSelection(agents, activityById, highlightedAgentId),
+    [agents, activityById, highlightedAgentId],
   );
 
   return (
@@ -140,7 +128,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
         </div>
       </div>
 
-      <div className={`econ-list${disabled ? " locked" : ""}`}>
+      <div ref={listRef} className={`econ-list${disabled ? " locked" : ""}`}>
         {ordered.map((a) => {
           const hue = categoryHue(a.category);
           const joining = now - (a.joined_at ?? 0) < JOINING_MS;
@@ -152,10 +140,6 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
           const cls =
             `econ-card${joining ? " joining" : ""}${highlighted ? " highlighted" : ""}` +
             `${disabled ? " locked" : ""}`;
-          const setRef = (el: HTMLElement | null) => {
-            if (el) cardRefs.current.set(a.id, el);
-            else cardRefs.current.delete(a.id);
-          };
           const inner = (
             <>
               {/* TOP ROW: name · model · stroke badge (top-right) */}
@@ -213,7 +197,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
           return disabled ? (
             <div
               key={a.id}
-              ref={setRef}
+              data-agent-id={a.id}
               className={`${cls} static`}
               style={{ ["--agent-hue" as string]: `${hue}` }}
               aria-disabled
@@ -223,7 +207,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId }: Pro
           ) : (
             <Link
               key={a.id}
-              ref={setRef}
+              data-agent-id={a.id}
               href={`/agent/${a.id}`}
               className={cls}
               style={{ ["--agent-hue" as string]: `${hue}` }}

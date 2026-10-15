@@ -8,6 +8,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { AgentProfile, StrokeTransform, TransitionPath } from "@/lib/types";
+import { canvasRevisionOf, publishCanvasReset, subscribeCanvasReset } from "@/lib/canvasReset";
 
 export interface AppSnapshot {
   agents: AgentProfile[];
@@ -18,10 +19,13 @@ export interface AppSnapshot {
   funding: boolean;
   /** Total catalog size (ceiling on attractable agents). remaining = capacity - agents. */
   capacity: number;
+  /** Changes on local or remote canvas reset so page-level editing UI can reset. */
+  resetRevision: number;
+  clearing: boolean;
 }
 
 const EMPTY: AppSnapshot = Object.freeze({
-  agents: [], strokes: [], ready: false, generating: false, funding: false, capacity: 0,
+  agents: [], strokes: [], ready: false, generating: false, funding: false, capacity: 0, resetRevision: 0, clearing: false,
 });
 
 type Listener = () => void;
@@ -33,6 +37,11 @@ class AppStore {
   private generating = false;
   private funding = false;
   private capacity = 0;
+  private canvasRevision: number | null = null;
+  private strokeEpoch = 0;
+  private resetRevision = 0;
+  private clearing = false;
+  private resetSubscription: (() => void) | null = null;
   private fundTimer: ReturnType<typeof setTimeout> | null = null;
 
   private listeners = new Set<Listener>();
@@ -41,6 +50,7 @@ class AppStore {
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   subscribe = (cb: Listener): (() => void) => {
+    this.ensureResetSync();
     this.listeners.add(cb);
     return () => { this.listeners.delete(cb); };
   };
@@ -54,6 +64,8 @@ class AppStore {
         generating: this.generating,
         funding: this.funding,
         capacity: this.capacity,
+        resetRevision: this.resetRevision,
+        clearing: this.clearing,
       };
     }
     return this.cached;
@@ -66,16 +78,57 @@ class AppStore {
     this.listeners.forEach((l) => l());
   }
 
+  private ensureResetSync(): void {
+    if (!this.resetSubscription && typeof window !== "undefined") {
+      this.resetSubscription = subscribeCanvasReset(({ canvasRevision }) => this.applyReset(canvasRevision));
+    }
+  }
+
+  private invalidateStrokeRequests(): void {
+    this.strokeEpoch++;
+    this.generating = false;
+    for (const timer of this.persistTimers.values()) clearTimeout(timer);
+    this.persistTimers.clear();
+  }
+
+  private applyReset(revision: number): void {
+    if (this.canvasRevision !== null && revision <= this.canvasRevision) return;
+    this.canvasRevision = revision;
+    this.invalidateStrokeRequests();
+    this.strokes = [];
+    this.resetRevision++;
+    this.emit();
+  }
+
+  /** Authoritative reads may discover a reset performed on another device. */
+  private acceptServerRevision(value: unknown): boolean {
+    const revision = canvasRevisionOf(value);
+    if (revision === null) return true;
+    if (this.canvasRevision !== null && revision < this.canvasRevision) return false;
+    if (this.canvasRevision === null) this.canvasRevision = revision;
+    else if (revision > this.canvasRevision) {
+      this.applyReset(revision);
+      publishCanvasReset(revision);
+    }
+    return true;
+  }
+
   async bootstrap(): Promise<void> {
+    this.ensureResetSync();
+    if (this.clearing) return;
+    const epoch = this.strokeEpoch;
     try {
       const [ar, sr] = await Promise.all([
         fetch("/api/agents", { cache: "no-store" }),
         fetch("/api/strokes", { cache: "no-store" }),
       ]);
-      const ad = await ar.json();
+      if (!ar.ok || !sr.ok) throw new Error("Could not load the canvas.");
+      const [ad, sd] = await Promise.all([ar.json(), sr.json()]);
       this.agents = ad.agents ?? [];
       this.capacity = ad.capacity ?? this.agents.length;
-      this.strokes = (await sr.json()).strokes ?? [];
+      if (epoch === this.strokeEpoch && !this.clearing && this.acceptServerRevision(sd.canvasRevision)) {
+        this.strokes = sd.strokes ?? [];
+      }
     } catch {
       /* offline → empty */
     }
@@ -176,9 +229,15 @@ class AppStore {
   }
 
   async refresh(): Promise<void> {
+    this.ensureResetSync();
+    if (this.clearing) return;
+    const epoch = this.strokeEpoch;
     try {
       const sr = await fetch("/api/strokes", { cache: "no-store" });
-      this.strokes = (await sr.json()).strokes ?? this.strokes;
+      if (!sr.ok) return;
+      const data = await sr.json();
+      if (epoch !== this.strokeEpoch || this.clearing || !this.acceptServerRevision(data.canvasRevision)) return;
+      this.strokes = data.strokes ?? this.strokes;
       this.emit();
     } catch {
       /* keep last-known */
@@ -187,20 +246,28 @@ class AppStore {
 
   /** Generate one A→B stroke (optionally by a specific agent) and append it. */
   async generate(from: string, to: string, agentId?: string): Promise<void> {
-    if (!from.trim() || !to.trim() || this.generating) return;
+    this.ensureResetSync();
+    if (!from.trim() || !to.trim() || this.generating || this.clearing) return;
+    const epoch = this.strokeEpoch;
     this.generating = true;
     this.emit();
     try {
       const r = await fetch("/api/generateStroke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from: from.trim(), to: to.trim(), agent_id: agentId }),
+        body: JSON.stringify({ from: from.trim(), to: to.trim(), agent_id: agentId, ...(this.canvasRevision !== null ? { canvasRevision: this.canvasRevision } : {}) }),
       });
       const d = await r.json();
-      if (r.ok && d.stroke) this.strokes = [...this.strokes, d.stroke as TransitionPath];
+      if (epoch !== this.strokeEpoch || !this.acceptServerRevision(d.canvasRevision)) return;
+      if (r.ok && d.stroke) {
+        this.strokes = [...this.strokes, d.stroke as TransitionPath];
+        this.emit();
+      }
     } finally {
-      this.generating = false;
-      this.emit();
+      if (epoch === this.strokeEpoch) {
+        this.generating = false;
+        this.emit();
+      }
     }
   }
 
@@ -214,12 +281,15 @@ class AppStore {
    * so Save & Exit always reads the latest value even before this fires.
    */
   persistTransform(id: string, transform: StrokeTransform): void {
+    if (this.clearing) return;
+    const epoch = this.strokeEpoch;
     const prev = this.persistTimers.get(id);
     if (prev) clearTimeout(prev);
     this.persistTimers.set(
       id,
       setTimeout(() => {
         this.persistTimers.delete(id);
+        if (epoch !== this.strokeEpoch || this.clearing) return;
         const i = this.strokes.findIndex((s) => s.id === id);
         if (i === -1) return;
         this.strokes = this.strokes.map((s) => (s.id === id ? { ...s, transform } : s));
@@ -259,13 +329,30 @@ class AppStore {
   }
 
   /** Clear all strokes (canvas reset). Agent identities persist. */
-  async clear(): Promise<void> {
-    this.strokes = [];
+  async clear(): Promise<boolean> {
+    this.ensureResetSync();
+    if (this.clearing) return false;
+    this.clearing = true;
+    this.invalidateStrokeRequests();
     this.emit();
+    let cleared = false;
     try {
-      await fetch("/api/strokes", { method: "DELETE" });
+      const response = await fetch("/api/strokes", { method: "DELETE" });
+      if (!response.ok) return false;
+      const data = await response.json();
+      const revision = canvasRevisionOf(data.canvasRevision);
+      if (data.cleared !== true || revision === null) return false;
+      this.applyReset(revision);
+      publishCanvasReset(revision);
+      cleared = true;
+      return true;
     } catch {
-      /* ignore */
+      return false;
+    } finally {
+      this.clearing = false;
+      this.emit();
+      // A lost acknowledgement is uncertain; read the server, never retry DELETE.
+      if (!cleared) void this.refresh();
     }
   }
 }

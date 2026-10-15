@@ -14,17 +14,38 @@
 //         4 mood + structural mode · 5 semantic anchors · 6 causal layer · 7 raw JSON
 // ============================================================================
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
-import CanvasView from "@/components/CanvasView";
-import type { Agent, AgentProfile, TransitionPath } from "@/lib/types";
+import StrokePlayerPanel from "@/components/StrokePlayerPanel";
+import type { AgentProfile, BrushStrokeStyle, StrokeMotionPattern, TransitionPath } from "@/lib/types";
 import { agentRenderStyle, categoryLabel } from "@/lib/agents";
-import { resolveVisualSignature } from "@/engine/visualSignature";
+import { motionStabilityFromDurations, pathLength, resolveVisualSignature, WIDTH_STABILITY_CONSTANT_THRESHOLD, WIDTH_STABILITY_FREQUENT_THRESHOLD } from "@/engine/visualSignature";
+import { buildMotionPath } from "@/engine/motionPattern";
+import { getStrokePlayback } from "@/engine/strokePlayback";
+import { hashStr } from "@/simulation/rng";
 
-const noop = () => {};
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 const fmtSigned = (v: number) => (v >= 0 ? "+" : "") + v.toFixed(2);
+const fmtTime = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+
+const MOTION_LABELS: Record<StrokeMotionPattern, string> = {
+  glide: "Direct glide", arc: "Arc sweep", wave: "Wave", fold: "Folded flight", orbit: "Expanding orbit", wander: "Wandering flight",
+};
+const MOTION_EFFECTS: Record<StrokeMotionPattern, string> = {
+  glide: "A nearly straight flight with a slight amplitude-led crosswind. It intentionally leaves return and crossing budgets unused.",
+  arc: "One broad circular sweep. Curvature chooses its side and span; the return budget can widen the sweep without inserting separate loops.",
+  wave: "One to four broad lateral lobes, using the larger of the turn and return budgets. Amplitude sets their height while forward travel stays monotonic.",
+  fold: "Alternating connected legs with at most four principal corners. A nonzero crossing budget permits natural overlaps of these legs, not attached loop symbols.",
+  orbit: "One continuously expanding spiral. The return budget and amplitude increase its angular travel; curvature chooses its winding direction. It does not paste closed rings onto a line.",
+  wander: "A few unequal, seeded legs. Amplitude and the return budget widen their heading changes; candidates exceeding the crossing budget are restrained. The route never splits.",
+};
+const MATERIAL_EFFECTS: Record<BrushStrokeStyle, string> = {
+  hard: "A clean 35° chisel face with a crisp highlight and dark cut edge; width changes with travel direction.",
+  soft: "A pressure-shaped ink belly, compressed dark edge and three connected internal ink channels, ending in a lifted point.",
+  watercolor: "A broad wet belly with uneven continuous wet rims and seeded pigment-sediment bands inside the same stroke.",
+  texture: "Five clipped, high-contrast longitudinal dry-brush grooves, with seeded changes in groove width and pigment deposition—not scattered particles.",
+};
 
 // ---- Layer 3: per-attribute inspector docs --------------------------------
 interface AttrDoc {
@@ -35,131 +56,159 @@ interface AttrDoc {
   highLow: string;
 }
 const ATTR_DOCS: Record<string, AttrDoc> = {
+  curvature_bias: {
+    definition: "Signed mood curvature. Its sign chooses the bend side or winding direction; this is separate from measured source curvature.",
+    geometry: "Magnitude widens an arc and contributes 15% of motion amplitude. The sign selects the local bend/winding side. Near-zero values use the stable creation seed where a side is needed.",
+    motion: "Drift rotates the complete gesture separately; curvature acts within that orientation and does not alter duration.",
+    ranges: "−1 to +1. Opposite signs change local bend/winding direction; screen orientation also depends on drift rotation.",
+    highLow: "Large magnitude → stronger curvature contribution. Near zero → a restrained bias with deterministic variation.",
+  },
+  motion_amplitude: {
+    definition: "A 0–1 lateral-exploration signal derived from existing attributes rather than an unrelated random magnitude.",
+    geometry: "amplitude = clamp(0.62 × entropy + 0.23 × (1 − confidence) + 0.15 × |curvature bias|). It changes crosswind, wave height, folded-lane spread, orbit travel or wandering heading range.",
+    motion: "Controls spatial movement, not playback rate. The arc family instead uses signed curvature and its return budget directly.",
+    ranges: "0–1, interpreted within the selected family.",
+    highLow: "High → broader lateral exploration. Low → restrained movement. Length remains an independent travel-distance constraint.",
+  },
+  motion_pattern: {
+    definition: "The complete one-stroke movement family selected by geometry_mode. Crossing settings cannot override it.",
+    geometry: "linear → direct glide; curved → arc sweep; oscillatory → wave; recursive → folded flight; spiral → expanding orbit; fragmented → wandering flight. Each is one ordered, unbranched centerline.",
+    motion: "Amplitude, signed curvature and turn/return budgets vary the chosen family. The shared timeline reveals that route continuously.",
+    ranges: "Six categorical families, not opacity settings or copies of one looping template.",
+    highLow: "No high/low ranking: a glide may leave its crossing budget unused; a fold may overlap earlier legs; an orbit expands around one center.",
+  },
   entropy: {
-    definition: "Local uncertainty in the agent's path — how noisy or diffuse each step is.",
-    geometry: "Higher entropy roughens the path and raises branching probability; lower entropy yields clean, deterministic geometry.",
-    motion: "Adds jitter and softer, more diffuse edges to the travelling pulse.",
-    ranges: "0.0 – 1.0 · typical strokes sit ~0.1 – 0.7.",
-    highLow: "High → frayed, exploratory, blurry lines. Low → crisp, decisive, minimal lines.",
+    definition: "Average uncertainty in the semantic path; affects spatial exploration and material texture, not whether the stroke is continuous.",
+    geometry: "Entropy supplies 62% of motion amplitude and sets a self-crossing ceiling. It broadens the selected family's bends without replacing that family with a generic weave.",
+    motion: "Local entropy also increases material dryness and edge irregularity. Dwell times independently set the head's phase-speed weights.",
+    ranges: "0–1. Crossing ceiling: <0.38 → 0; 0.38–0.72 → 0–4; >0.72 → 5–8 only when long, otherwise capped at 4.",
+    highLow: "High → greater lateral exploration and more permitted intersections. Low → quieter movement. A high ceiling does not require any actual crossings.",
   },
   confidence: {
-    definition: "Certainty of the agent at each step — drives brightness and determinism.",
-    geometry: "High confidence reduces path divergence (straighter, more direct); low confidence permits wandering.",
-    motion: "Brighter core and steadier travel along the path.",
-    ranges: "0.0 – 1.0 · typical ~0.4 – 0.9.",
-    highLow: "High → bright, direct, committed. Low → dim, hesitant, divergent.",
+    definition: "Certainty recorded at each semantic step; its average helps determine source width and movement amplitude.",
+    geometry: "Higher confidence reduces lateral amplitude through the (1 − confidence) term, while increasing the source-width signal. It also consolidates material edges and reduces dryness.",
+    motion: "Confidence shapes the route and pigment coherence, not animation speed. Dwell and intensity determine duration.",
+    ranges: "0–1. Motion amplitude includes 0.23 × (1 − average confidence).",
+    highLow: "High → restrained lateral movement and coherent edges. Low → more exploration and dry texture. Material width limits still apply.",
   },
   duration: {
-    definition: "Total dwell time across the path — the temporal length of the cognitive event.",
-    geometry: "Longer durations elongate stroke continuity and span more semantic anchors.",
-    motion: "Slower, more continuous travel; short durations feel bursty and clipped.",
-    ranges: "~500 – 6000ms depending on path length + agent pacing.",
-    highLow: "High → long, flowing, continuous. Low → short, staccato gestures.",
+    definition: "The sum of recorded dwell times across the source path; this is input data, not the animation's elapsed time.",
+    geometry: "Total dwell combines with anchor count and intensity to derive the source length value and its short, medium or long category.",
+    motion: "Contributes to the meteor's drawing duration together with path intensity. See drawing duration for the actual playback time.",
+    ranges: "Shown in milliseconds as the exact sum of the source points' duration_ms values. The separate drawing-duration attribute reports playback seconds.",
+    highLow: "More dwell generally raises the derived length value and slows the reveal, subject to each calculation's limits. It does not add source anchors.",
   },
   points: {
     definition: "Number of sampled semantic anchors along the A→B transition.",
-    geometry: "More points = denser, more articulated geometry with more inflection.",
-    motion: "More segments for the pulse to traverse before completing.",
+    geometry: "Anchor count contributes to derived length. Principal turns use a remainder rule capped at four, so more anchors do not necessarily mean more visible corners.",
+    motion: "Anchors are grouped into 3–6 equal-distance speed phases. Their dwell times set relative phase speeds; the animation uses a dense sampled centerline rather than revealing one point per frame.",
     ranges: "Typically 4 – 12 anchors.",
-    highLow: "High → intricate, multi-step reasoning. Low → terse, direct leaps.",
+    highLow: "High → more recorded semantic samples. Low → fewer samples. Visible shape and timing follow the derived attributes rather than the point count alone.",
   },
   intensity: {
-    definition: "Activation magnitude along the path — deterministically selects the drawing instrument.",
-    geometry: "Average intensity selects the tool: hard <0.70, soft 0.70–0.76, watercolor 0.76–0.83, texture ≥0.83.",
-    motion: "Hard uses a stable square nib; soft uses pressure taper; watercolor creates edge pooling and bloom; texture uses grain and irregular edges.",
-    ranges: "0.0 – 1.0 · current generated paths typically occupy ~0.65 – 0.90.",
-    highLow: "High → textured, material drag. Low → precise, hard-edged mark.",
+    definition: "Activation magnitude along the path; selects the physical material and contributes to drawing duration.",
+    geometry: "Hard <0.70: clean chisel face. Soft 0.70–0.76: ink belly and compressed edge. Watercolor 0.76–0.83: wet rims and pigment sediment. Texture ≥0.83: five high-contrast dry-brush grooves.",
+    motion: "Material changes actual contour, leading edge and internal pigment, not only opacity. Local intensity changes pigment loading; higher average intensity shortens duration for the same dwell.",
+    ranges: "0–1. Physical-material thresholds: 0.70, 0.76 and 0.83.",
+    highLow: "Crossing a threshold changes the material. Within each material, pressure, entropy, confidence and seeded structure create further variation.",
   },
   curvature: {
-    definition: "Average turning of the trajectory between consecutive segments.",
-    geometry: "Higher curvature bends the path into arcs and orbits; low curvature stays linear.",
-    motion: "Sweeping, looping travel versus a straight glide.",
-    ranges: "0.0 (straight) – 1.0 (sharp reversals).",
-    highLow: "High → swirling, organic. Low → rigid, direct.",
+    definition: "Measured average turning between consecutive source segments; distinct from the signed curvature-bias attribute.",
+    geometry: "This contributes to the source turn-angle descriptor. The visible route now comes from its six-family motion pattern, not a direct tracing of all source corners.",
+    motion: "It does not create extra orbits or set speed. Curvature bias controls bend direction/span, while sharpness rounds local joins.",
+    ranges: "0 = straight source path; 1 = near-reversing source path.",
+    highLow: "High → larger recorded angle descriptor. Low → smaller descriptor. This is not a literal count of visible bends.",
   },
   branching: {
-    definition: "Density of sub-branch spurs spawned along the path.",
-    geometry: "Higher density adds components to the brush head; crossings are controlled separately by entropy and the length gate.",
-    motion: "Branching changes the pressure/head behaviour without creating detached secondary strokes.",
+    definition: "Recorded branching density in the original cognitive path.",
+    geometry: "This is retained as provenance metadata. The meteor presentation uses one continuous centerline and does not add branch spurs or separate nib shapes.",
+    motion: "The same moving head traverses the full route without splitting into secondary strokes.",
     ranges: "0.0 (none) – 1.0+ (dense fan).",
-    highLow: "High → a more complex composite nib and pressure response. Low → a simpler clean gesture.",
+    highLow: "High and low describe the source path's branching metadata; neither introduces visible branches in the meteor renderer.",
   },
   stability: {
-    definition: "Uniformity of per-step pacing, used as the control signal for deliberate width transitions.",
-    geometry: "Only exceptionally low values keep one width; medium values create 1–3 seeded width changes; high values create 5–8 changes.",
-    motion: "Each change modifies the actual brush pressure along the same path, allowing thick → thin → thick sequences.",
-    ranges: "<0.18 = constant; 0.18–0.68 = 1–3 changes; ≥0.68 = 5–8 changes.",
-    highLow: "High → 5–8 pressure/width phases. Middle → 1–3 phases. Only exceptionally low stability stays uniform.",
+    definition: "Pacing uniformity: clamp(1 − standard deviation / mean dwell, 0, 1). This recorded signal selects how frequently the nib presses and lifts.",
+    geometry: "Only the lowest 0.02 band remains constant. Middle values produce 1–3 broad press/lift transitions; values at or above 0.45 produce 5–8. Each transition moves between a fine valley and a visibly broad peak.",
+    motion: "Pressure changes the width on the same continuous centerline. Smoothstep easing rounds every peak and valley without changing the route, adding branches or changing playback timing.",
+    ranges: `<${WIDTH_STABILITY_CONSTANT_THRESHOLD.toFixed(2)} = constant; ${WIDTH_STABILITY_CONSTANT_THRESHOLD.toFixed(2)}–<${WIDTH_STABILITY_FREQUENT_THRESHOLD.toFixed(2)} = 1–3 changes; ≥${WIDTH_STABILITY_FREQUENT_THRESHOLD.toFixed(2)} = 5–8 changes.`,
+    highLow: "High → frequent, pronounced press/lift rhythm. Middle → fewer but equally strong changes. Only extremely low stability holds pressure constant; the material can still taper its own outline.",
   },
   motion_variation: {
-    definition: "The stroke's 0–1 motion variability value; it controls temporal liveliness, U-turn count and the permitted palette size.",
-    geometry: "<0.35 stays forward; higher tiers create 1–4 continuous direction reversals without branches or disconnected marks.",
-    motion: "Higher values increase the flexibility and pressure pulse of the living brush body.",
-    ranges: "Reversals: <0.35 = 0, 0.35–0.58 = 1, 0.58–0.78 = 2, 0.78–0.92 = 3, ≥0.92 = 4; short/medium capacity is 1/2. Long-stroke color tiers remain 1/3/5.",
-    highLow: "High → repeated continuous U-turns and, when long, a five-pigment gradient. Low → direct travel with one pigment.",
+    definition: "A 0–1 mood value used to derive a return budget and, for long strokes, the palette-size tier.",
+    geometry: "The family interprets this budget as wider arc sweep, wave lobes, folded legs, orbit travel or wandering heading range. A glide can leave it unused; no universal hairpin is inserted.",
+    motion: "Changes spatial behavior, not the playback clock. Dwell and intensity set duration; phase weights distribute time.",
+    ranges: "Return budget: <0.35 = 0; 0.35–0.58 = 1; 0.58–0.78 = 2; 0.78–0.92 = 3; ≥0.92 = 4. Short/medium capacities are 1/2. Long palettes use 1/3/5 pigments.",
+    highLow: "High → more permitted angular travel or folding within the family. Low → restrained travel. The budget is not an exact count of identical U-turns.",
   },
   line_length: {
-    definition: "The total distance travelled by the stroke, measured against one side of the square canvas.",
-    geometry: "Length controls how much territory the path traverses; long strokes can loop repeatedly while a zero-length stroke resolves to a point.",
-    motion: "A longer path gives the moving head more distance and more temporal phases to reveal.",
-    ranges: "Attribute <5 = Short (point–10% scale); 5–6 = Medium (10–50%); >6 = Long (50–100%). Values vary continuously inside each range.",
-    highLow: "High → extended, layered journeys. Low → compact marks; minimum → a single point.",
+    definition: "A derived source length value, not the literal pixel length of the displayed path.",
+    geometry: "The value chooses a continuous target distance within short, medium or long. The complete family is uniformly scaled and shifted to fit; individual points are never clamped into a border pile.",
+    motion: "The head travels the resulting centerline. Duration is independent, so a longer distance need not take proportionally more time.",
+    ranges: "Source <5: short, up to 0.112 normalized square-canvas units; 5–6: medium, 0.112–0.56; >6: long, 0.56–1.12. Fitting may reduce the target. Minimum is a point.",
+    highLow: "High → a greater travel-distance allowance. Low → a compact gesture. Source length, generated distance and camera zoom are distinct quantities.",
   },
   line_width: {
-    definition: "Stroke diameter as a proportion of the square canvas side, independent of device resolution.",
-    geometry: "Changes the physical mass of every segment without changing its centerline.",
-    motion: "Wide strokes leave broad luminous trails; thin strokes read as precise moving filaments.",
-    ranges: "1 – 10 screen pixels (up to 0.8% of canvas side); derived from intensity, confidence and inverse entropy with a strongly thin-biased curve.",
-    highLow: "High → monumental bands. Low → hairline or point-like traces.",
+    definition: "The source stroke width as a proportion of the square canvas side, interpreted through the selected brush material.",
+    geometry: "Source width, the seeded pressure profile and nib geometry jointly set the swept ribbon's width. Hard nibs also respond to travel direction; soft nibs add a press-and-lift envelope.",
+    motion: "The head is the front edge of this same ribbon. Pressure changes its size and the mark left behind it without spawning separate shapes.",
+    ranges: "Material-response ranges in CSS pixels: hard 0.60–6.40, soft 0.35–12, watercolor 0.65–12, texture 0.55–11.80. A fine connected base is preserved; short pressure phases receive a tighter peak cap to avoid beads. The leading tip and tail can taper narrower.",
+    highLow: "High source width or pressure → a wider nib and stronger body. Low → finer travel. Material-specific limits keep all strokes readable together.",
   },
   width_variation: {
-    definition: "The seeded pressure profile that changes thickness along this individual stroke.",
-    geometry: "Profile values are interpolated continuously, so width swells and contracts without breaking the centerline.",
-    motion: "The living brush carries these width states while it flexes; this is not an opacity effect.",
-    ranges: "0 changes for stability <0.18; 1–3 for 0.18–0.68; 5–8 at or above 0.68. Multipliers span a clearly visible 0.32×–1.72× range.",
-    highLow: "Many changes → repeated thick/thin rhythm. Zero changes → uniform pressure from start to end.",
+    definition: "A seeded pressure envelope that makes this individual stroke visibly thicken and thin along its travel.",
+    geometry: "Extrema alternate between 0.15–0.30× valleys and 1.85–2.20× peaks. They are not normalized back toward an average of one, so the strong contrast survives. Material response translates pressure into physical width, capped at 12 CSS pixels.",
+    motion: "Smoothstep interpolation makes every press/lift transition continuous, with a smooth change of slope at extrema. The profile stays attached to path distance during play, pause, replay and seeking.",
+    ranges: `<${WIDTH_STABILITY_CONSTANT_THRESHOLD.toFixed(2)} stability: constant; ${WIDTH_STABILITY_CONSTANT_THRESHOLD.toFixed(2)}–<${WIDTH_STABILITY_FREQUENT_THRESHOLD.toFixed(2)}: 1–3 transitions; ≥${WIDTH_STABILITY_FREQUENT_THRESHOLD.toFixed(2)}: 5–8. Pressure spans 0.15×–2.20×; physical width also depends on material.`,
+    highLow: "Peaks produce a strong body; valleys retain a fine connected strand. More transitions repeat that contrast more often. The seed fixes the same profile on every replay.",
   },
   crossings: {
-    definition: "The intended number of natural self-crossings in one uninterrupted gesture.",
-    geometry: "The whole path continuously swings forward and locally folds over its earlier route; no figure-eight modules or branches are inserted.",
-    motion: "The moving head revisits shared coordinates at different moments, creating accumulated light at intersections.",
-    ranges: "Entropy <0.38 = 0; 0.38–0.72 = 0–4; >0.72 = 5–8 only for long strokes. Short and medium strokes are capped at 4.",
-    highLow: "High entropy + long length → woven 5–8 crossing structure. Low entropy → open, uninterrupted trajectory.",
+    definition: "The maximum permitted self-crossings, together with the actual count on this generated centerline.",
+    geometry: "Folds and wandering paths can naturally revisit earlier legs. Glides, arcs, waves and expanding orbits need not consume the budget. Excess-crossing candidates are restrained rather than adding figure-eight modules.",
+    motion: "One head revisits a coordinate at a later time. Actual means centerline intersections before bounded corner rounding, not branches or multiple brush strokes.",
+    ranges: "Entropy <0.38 → ceiling 0; 0.38–0.72 → ceiling 0–4; >0.72 → ceiling 5–8 only when long, otherwise at most 4. Actual is always ≤ ceiling.",
+    highLow: "High → overlaps are permitted, not required. Zero → no self-crossings. The selected motion family is preserved.",
   },
   brush_head: {
-    definition: "The primitive or composite shape carried by the moving drawing head.",
-    geometry: "Round, square, diamond, triangle, ring and organic primitives may appear alone or in combinations of up to three.",
-    motion: "The chosen silhouette travels with the pulse, so the act of drawing has its own visible instrument.",
-    ranges: "1 – 3 components; geometry mode selects the primary head, motion mode and branching add secondary heads.",
-    highLow: "Single → clean signature. Multiple → layered, more synthetic imprint.",
+    definition: "The physical material of the moving nib. The head is the front of its ribbon, not a detached dot overlay.",
+    geometry: "Hard: clean 35° chisel face and cut edge. Soft: ink belly, compressed edge and three internal ink channels. Watercolor: wet rims and pigment sediment. Texture: five high-contrast dry-brush grooves clipped within the silhouette.",
+    motion: "Hard/texture ends are oblique; soft lifts to a point; watercolor has a wet leading contour. Entropy, confidence, intensity and pressure vary continuous internal deposition as the same head travels.",
+    ranges: "Intensity <0.70: hard; 0.70–0.76: soft; 0.76–0.83: watercolor; ≥0.83: texture. Primitive-head metadata is provenance, not separate stamps.",
+    highLow: "Materials differ in contour, pressure response, pigment and groove structure—not simply opacity. A genuine zero-length gesture remains a compact point.",
   },
   color_system: {
     definition: "A seeded random palette distributed continuously and evenly over the travelled length of the stroke.",
     geometry: "Color changes pigment only; it never splits or duplicates the one-stroke centerline.",
-    motion: "The gradient remains attached to the living brush body as its pressure and curvature evolve.",
-    ranges: "Long stroke + motion <0.35 = 1 color; 0.35–0.70 = 3; >0.70 = 5. Non-long strokes are locked to 1.",
+    motion: "The gradient remains attached to travelled distance as the meteor reveals the route.",
+    ranges: "Long stroke + motion <0.35 = 1 color; 0.35–<0.70 = 3; ≥0.70 = 5. Non-long strokes are locked to 1.",
     highLow: "High motion on a long stroke → five random color stops. Otherwise → one random color.",
   },
   draw_speed: {
-    definition: "A multi-stage speed profile sampled continuously from the start to the end of the stroke.",
+    definition: "The meteor's travel rhythm, derived from the dwell times recorded along its semantic path.",
     geometry: "Speed leaves the path coordinates unchanged, keeping form and time independently controllable.",
-    motion: "Every segment reads its local phase speed, producing acceleration, hesitation and bursts within one line.",
-    ranges: "3 – 6 phases; each phase is the inverse of its original duration_ms (long dwell = slow draw).",
-    highLow: "High variation → dramatic rhythm changes. Low variation → steady traversal.",
+    motion: "The moving head follows equal-distance phases at different speeds. Slower phases occupy more of the timeline; faster phases take less time.",
+    ranges: "Relative phase-speed weights range from 0.12 to 2.00; they compare phases within this stroke, not against an absolute canvas speed. The playback rate control scales the whole animation.",
+    highLow: "High local speed → a quick sweep. Low local speed → a lingering reveal. Greater phase contrast creates a more varied journey.",
+  },
+  drawing_duration: {
+    definition: "The time this meteor takes to reveal its complete trajectory at 1× playback.",
+    geometry: "Duration changes when each part of the trajectory appears; it does not stretch or reshape the artwork.",
+    motion: "Total recorded dwell time and average path intensity determine the overall duration. The phase speed profile then distributes that time along the route.",
+    ranges: "2.2–14 seconds at 1×. Replay, pause and seek all use this same timeline.",
+    highLow: "More dwell generally gives a longer reveal; higher intensity generally makes it faster. The animation stays within a readable duration range.",
   },
   turn_system: {
-    definition: "Three linked controls: a 0–4 turn-count remainder, direction-change angle and corner sharpness.",
-    geometry: "Angle determines how far the line redirects; sharpness blends from a rounded Catmull-Rom bend to a hard linear corner.",
-    motion: "Rounded turns feel fluid; hard near-180° turns make the travelling head snap back decisively.",
-    ranges: "Original turns are folded by modulo 4 into 1–4 (a two-point path stays at 0); angle 0°–179°; entropy, curvature mood and motion determine sharpness.",
-    highLow: "High → near-reversal with a hard crease. Low → shallow, circular flow.",
+    definition: "The principal-turn budget, source turn-angle descriptor and local corner sharpness; not a count of every sampled curve segment.",
+    geometry: "Turn and return budgets jointly set fold corners and wave lobes; the turn budget sets wander corners. Each stays within four principal changes. A glide or arc need not use every turn. Bounded joins round corners without overshooting or branching.",
+    motion: "One head follows the complete family. Return budget and curvature govern broader angular travel; timing is independent.",
+    ranges: "Source turns use a modulo-four remainder: 1–4, or 0 for at most two anchors. Source angle 0°–179°; sharpness 0–1.",
+    highLow: "Larger budget → more permitted principal changes. Higher sharpness → tighter local joins; lower sharpness → broader rounding.",
   },
   direction_system: {
-    definition: "The overall travel orientation plus the number of macro direction reversals.",
-    geometry: "Drift bias maps around 360° to rotate the full gesture; motion variation inserts continuous, laterally separated hairpin turns.",
-    motion: "Every reversal is traversed by the same brush head in sequence, so the line visibly turns back rather than spawning another arm.",
-    ranges: "Direction 0°–360° from drift_bias; U-turn count 0–4 from motion variation, capped to 1 for short and 2 for medium strokes.",
-    highLow: "High motion → several changes of travel direction. Low motion → a single dominant direction.",
+    definition: "Overall orientation from drift bias, plus the motion-family return budget.",
+    geometry: "Drift bias rotates the complete centerline through 360°. The family interprets its return budget rather than being replaced by a standard hairpin sequence.",
+    motion: "Direct, sweeping, wavy, folded, orbiting and wandering travel remain distinct after rotation.",
+    ranges: "Orientation 0°–360°. Return budget 0–4, capped at 1 for short and 2 for medium strokes.",
+    highLow: "Drift changes the global heading. A higher return budget can extend angular travel, but is not an exact U-turn count.",
   },
 };
 
@@ -177,18 +226,22 @@ export default function StrokeDetailPage() {
   const [stroke, setStroke] = useState<TransitionPath | null>(null);
   const [agent, setAgent] = useState<AgentProfile | null>(null);
   const [status, setStatus] = useState<"loading" | "ready" | "missing">("loading");
-  const [replayKey, setReplayKey] = useState(0);
   const [openAttr, setOpenAttr] = useState<string | null>(null);
 
   // Single source of truth: the SERVER store.
   useEffect(() => {
     let alive = true;
+    setStatus("loading");
+    setStroke(null);
+    setAgent(null);
+    setOpenAttr(null);
     (async () => {
       try {
         const r = await fetch(`/api/strokes/${encodeURIComponent(id)}`, { cache: "no-store" });
         if (!alive) return;
         if (!r.ok) { setStatus("missing"); return; }
         const d = await r.json();
+        if (!alive) return;
         setStroke(d.stroke ?? null);
         setAgent(d.agent ?? null);
         setStatus(d.stroke ? "ready" : "missing");
@@ -199,16 +252,15 @@ export default function StrokeDetailPage() {
     return () => { alive = false; };
   }, [id]);
 
-  const previewPaths = useMemo<TransitionPath[]>(() => (stroke ? [stroke] : []), [stroke]);
-  const previewAgents = useMemo<Agent[]>(
-    () => (stroke ? [{ id: stroke.agent_id, style: agentRenderStyle(agent?.category ?? "coding") }] : []),
-    [stroke, agent],
-  );
-
   const signature = useMemo(
     () => stroke ? resolveVisualSignature(stroke, agentRenderStyle(agent?.category ?? "coding").hue) : null,
     [stroke, agent],
   );
+  const timing = useMemo(() => stroke ? getStrokePlayback(stroke) : null, [stroke]);
+  const motion = useMemo(() => stroke && signature
+    ? buildMotionPath(stroke.points, signature, stroke.variation_seed ?? stroke.base_seed ?? hashStr(stroke.id))
+    : null, [stroke, signature]);
+  const travelledDistance = useMemo(() => motion ? pathLength(motion.points) : 0, [motion]);
 
   // ---- aggregate the core generative attributes from the point cloud -------
   const m = useMemo(() => {
@@ -235,15 +287,7 @@ export default function StrokeDetailPage() {
       curvature = c ? sum / c / Math.PI : 0;
     }
 
-    let stability = 1;
-    if (n >= 2) {
-      const ds = pts.map((p) => p.duration_ms);
-      const mean = ds.reduce((a, b) => a + b, 0) / ds.length;
-      if (mean > 0) {
-        const variance = ds.reduce((a, b) => a + (b - mean) ** 2, 0) / ds.length;
-        stability = clamp01(1 - Math.sqrt(variance) / mean);
-      }
-    }
+    const stability = motionStabilityFromDurations(pts.map((point) => point.duration_ms));
     const motionVariation = stroke?.mood?.motion_variation ?? 0.5;
     return { n, entropy, confidence, intensity, duration, branching, curvature, stability, motionVariation };
   }, [stroke]);
@@ -258,51 +302,61 @@ export default function StrokeDetailPage() {
     { key: "branching", label: "branching density", display: m.branching.toFixed(2), bar01: clamp01(m.branching) },
     { key: "stability", label: "motion stability", display: m.stability.toFixed(2), bar01: m.stability },
     { key: "motion_variation", label: "motion variation", display: m.motionVariation.toFixed(2), bar01: m.motionVariation },
+    ...(timing ? [{ key: "drawing_duration", label: "drawing duration", display: `${fmtTime(timing.durationMs)} at 1×`, bar01: clamp01(timing.durationMs / 14000) }] : []),
     ...(signature ? [
+      { key: "motion_pattern", label: "motion pattern", display: MOTION_LABELS[motion?.pattern ?? "glide"], bar01: 1 },
+      { key: "motion_amplitude", label: "motion amplitude", display: (signature.motion_amplitude ?? 0).toFixed(2), bar01: signature.motion_amplitude ?? 0 },
+      { key: "curvature_bias", label: "curvature bias", display: fmtSigned(signature.motion_curvature ?? 0), bar01: Math.abs(signature.motion_curvature ?? 0) },
       { key: "line_length", label: "line length", display: signature.length <= 0.002 ? "point" : `${signature.length_class} · ${signature.length.toFixed(2)}`, bar01: clamp01(signature.length / 21) },
       { key: "line_width", label: "line width", display: `${(signature.width_ratio * 100).toFixed(2)}%`, bar01: clamp01(signature.width_ratio / 0.008) },
       { key: "width_variation", label: "width variation", display: `${signature.width_change_count} change${signature.width_change_count === 1 ? "" : "s"}`, bar01: signature.width_change_count / 8 },
-      { key: "crossings", label: "crossings", display: `${signature.crossings}`, bar01: signature.crossings / 8 },
-      { key: "brush_head", label: "brush stroke", display: `${signature.brush_style} · ${signature.brush_heads.join(" + ")}`, bar01: signature.brush_style === "hard" ? 0.2 : signature.brush_style === "soft" ? 0.45 : signature.brush_style === "watercolor" ? 0.72 : 1 },
+      { key: "crossings", label: "crossings", display: `${motion?.crossingsUsed ?? 0} actual · ${motion?.crossingBudget ?? signature.crossings} max`, bar01: (motion?.crossingsUsed ?? 0) / 8 },
+      { key: "brush_head", label: "brush material", display: signature.brush_style, bar01: signature.brush_style === "hard" ? 0.2 : signature.brush_style === "soft" ? 0.45 : signature.brush_style === "watercolor" ? 0.72 : 1 },
       { key: "color_system", label: "color", display: `${signature.color_count} color${signature.color_count > 1 ? "s" : ""} · ${signature.length_class}`, bar01: signature.color_count / 5 },
-      { key: "draw_speed", label: "draw speed", display: `${signature.speed_profile.length} phases`, bar01: clamp01((Math.max(...signature.speed_profile) - Math.min(...signature.speed_profile)) / 1.88) },
-      { key: "turn_system", label: "turn", display: `${signature.turn_count} turns · ${signature.turn_angle_deg.toFixed(0)}°`, bar01: signature.turn_count / 4 },
-      { key: "direction_system", label: "direction", display: `${signature.direction_angle_deg.toFixed(0)}° · ${signature.reversal_count} U-turn${signature.reversal_count === 1 ? "" : "s"}`, bar01: signature.reversal_count / 4 },
+      { key: "draw_speed", label: "phase speed", display: `${signature.speed_profile.length} phases`, bar01: clamp01((Math.max(...signature.speed_profile) - Math.min(...signature.speed_profile)) / 1.88) },
+      { key: "turn_system", label: "turn budget", display: `${signature.turn_count} · ${signature.turn_angle_deg.toFixed(0)}° source`, bar01: signature.turn_count / 4 },
+      { key: "direction_system", label: "direction / return", display: `${signature.direction_angle_deg.toFixed(0)}° · budget ${motion?.reversalBudget ?? signature.reversal_count}`, bar01: signature.reversal_count / 4 },
     ] : []),
-  ], [m, signature]);
+  ], [m, signature, timing, motion]);
 
   const attributeState = useMemo<Record<string, string>>(() => {
     if (!signature) return {} as Record<string, string>;
     const hueList = signature.color_hues.map((hue) => `${Math.round(hue)}°`).join(" → ");
-    const speedRange = `${Math.min(...signature.speed_profile).toFixed(2)}–${Math.max(...signature.speed_profile).toFixed(2)}×`;
+    const speedRange = `${Math.min(...signature.speed_profile).toFixed(2)}–${Math.max(...signature.speed_profile).toFixed(2)}`;
+    const pattern = motion?.pattern ?? "glide";
+    const family = MOTION_LABELS[pattern];
+    const actualCrossings = motion?.crossingsUsed ?? 0;
+    const crossingBudget = motion?.crossingBudget ?? signature.crossings;
     return {
-      entropy: `Average entropy ${m.entropy.toFixed(2)} places this stroke in the ${signature.crossings === 0 ? "zero-crossing" : signature.crossings <= 4 ? "0–4 crossing" : "5–8 high-crossing"} tier, producing ${signature.crossings} visible self-crossing${signature.crossings === 1 ? "" : "s"}.`,
-      confidence: `Average confidence ${m.confidence.toFixed(2)} contributes to this stroke's ${(signature.width_ratio * 100).toFixed(2)}% canvas-relative width and ${signature.color_temperature >= 0 ? "warm" : "cold"} temperature metadata.`,
-      duration: `${m.duration}ms of total dwell contributes to a ${signature.length.toFixed(2)} length value and a ${signature.length_class} spatial span.`,
-      points: `${m.n} semantic anchors are reduced to ${signature.turn_count} principal turn${signature.turn_count === 1 ? "" : "s"}, keeping the gesture readable.`,
-      intensity: `Average intensity ${m.intensity.toFixed(2)} selects the ${signature.brush_style} instrument for this stroke.`,
-      curvature: `Measured curvature ${m.curvature.toFixed(2)} contributes to a ${signature.turn_angle_deg.toFixed(0)}° turn character and ${signature.turn_sharpness < 0.45 ? "rounded" : "sharper"} spline tension.`,
-      branching: `Branching density ${m.branching.toFixed(2)} produces a ${signature.brush_heads.join(" + ")} composite nib while preserving one continuous line.`,
-      stability: `Motion stability ${m.stability.toFixed(2)} selects ${signature.width_change_count} seeded width change${signature.width_change_count === 1 ? "" : "s"}; the temporal speed profile still spans ${speedRange}.`,
-      motion_variation: `Motion variation ${m.motionVariation.toFixed(2)} produces ${signature.reversal_count} continuous U-turn${signature.reversal_count === 1 ? "" : "s"} after the ${signature.length_class} length-cap, and ${signature.length_class === "long" ? `selects the ${signature.color_count}-color tier` : `is color-gated to 1 pigment`}.`,
-      line_length: `The derived length is ${signature.length.toFixed(2)}, so this is a ${signature.length_class} stroke using a variable position inside that class rather than its fixed maximum.`,
-      line_width: `The calculated width is ${(signature.width_ratio * 100).toFixed(2)}% of the canvas side, rendered with pressure variation from the selected ${signature.brush_style} tool.`,
-      width_variation: `${signature.width_change_count === 0 ? "This stroke stays at one uniform width." : `This stroke changes width ${signature.width_change_count} times with pressure multipliers ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}.`} Values are seeded and remain stable after refresh.`,
-      crossings: `This ${signature.length_class} stroke is assigned ${signature.crossings} natural self-crossing${signature.crossings === 1 ? "" : "s"}; the entire result remains one uninterrupted path.`,
-      brush_head: `Path intensity and structural modes select a ${signature.brush_style} stroke with ${signature.brush_heads.join(" + ")} nib geometry.`,
+      entropy: `Average entropy ${m.entropy.toFixed(2)} contributes ${(m.entropy * 0.62).toFixed(3)} to motion amplitude and permits at most ${crossingBudget} crossings after the ${signature.length_class} length gate. This ${family.toLowerCase()} actually uses ${actualCrossings}; the ceiling does not force loops.`,
+      confidence: `Average confidence ${m.confidence.toFixed(2)} contributes ${((1 - m.confidence) * 0.23).toFixed(3)} to movement amplitude. It also helps derive ${(signature.width_ratio * 100).toFixed(2)}% source width and the material's edge coherence; ${signature.color_temperature >= 0 ? "warm" : "cold"} temperature remains source metadata, not the seeded palette.`,
+      duration: `${m.duration}ms of recorded dwell contributes to a ${signature.length.toFixed(2)} source length value (${signature.length_class}). With intensity included, actual playback takes ${timing ? fmtTime(timing.durationMs) : "the derived duration"} at 1×.`,
+      points: `${m.n} source anchors yield a ${signature.turn_count}-turn budget under the remainder rule and ${signature.speed_profile.length} speed phases. ${family} interprets the budget according to its own geometry; these are semantic anchors, not animation frames.`,
+      intensity: `Average intensity ${m.intensity.toFixed(2)} selects ${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} It also contributes to the ${timing ? fmtTime(timing.durationMs) : "recorded"} reveal duration.`,
+      curvature: `Measured source curvature ${m.curvature.toFixed(2)} contributes to the ${signature.turn_angle_deg.toFixed(0)}° turn-angle descriptor. The separately derived sharpness ${signature.turn_sharpness.toFixed(2)} controls the meteor's bounded corner rounding.`,
+      branching: `The source records branching density ${m.branching.toFixed(2)} and ${signature.brush_heads.join(" + ")} nib metadata. These remain inspectable, while the displayed meteor follows one continuous, unbranched centerline.`,
+      stability: `Motion stability ${m.stability.toFixed(3)} falls in the ${m.stability < WIDTH_STABILITY_CONSTANT_THRESHOLD ? "extremely low / constant" : m.stability < WIDTH_STABILITY_FREQUENT_THRESHOLD ? "1–3 transition" : "5–8 transition"} band and selects ${signature.width_change_count} press/lift transition${signature.width_change_count === 1 ? "" : "s"}. ${signature.width_change_count ? "Each transition alternates a 0.15–0.30× valley with a 1.85–2.20× peak." : "Pressure is held at 1×."} Relative phase-speed weights remain ${speedRange}, independently of width.`,
+      motion_pattern: `${stroke?.geometry_mode ?? "linear (legacy default)"} selects ${family}. ${MOTION_EFFECTS[pattern]} This realization has ${actualCrossings} centerline crossings under a ceiling of ${crossingBudget}.`,
+      motion_amplitude: `${m.entropy.toFixed(2)} × 0.62 + (1 − ${m.confidence.toFixed(2)}) × 0.23 + |${fmtSigned(signature.motion_curvature ?? 0)}| × 0.15 gives amplitude ${(signature.motion_amplitude ?? 0).toFixed(3)}. ${MOTION_EFFECTS[pattern]}`,
+      curvature_bias: `Curvature bias ${fmtSigned(signature.motion_curvature ?? 0)} chooses this family's local bend/winding side and contributes ${(Math.abs(signature.motion_curvature ?? 0) * 0.15).toFixed(3)} to amplitude. ${pattern === "arc" ? "Its magnitude also directly widens this arc's sweep." : "It is distinct from the measured source-curvature descriptor."} Global rotation remains ${signature.direction_angle_deg.toFixed(0)}°.`,
+      motion_variation: `Motion variation ${m.motionVariation.toFixed(2)} gives a return budget of ${motion?.reversalBudget ?? signature.reversal_count} after the ${signature.length_class} length cap. ${MOTION_EFFECTS[pattern]} It also ${signature.length_class === "long" ? `selects ${signature.color_count} pigments` : "remains color-gated to one pigment"}.`,
+      line_length: `Source length ${signature.length.toFixed(2)} selects ${signature.length_class}. After continuous scaling and boundary fitting, the generated centerline travels ${travelledDistance.toFixed(3)} normalized square-canvas units before corner rounding and camera zoom. It is not a fixed-length template.`,
+      line_width: `The source width is ${(signature.width_ratio * 100).toFixed(2)}% of the canvas side. This source value and pressure profile are remapped through the ${signature.brush_style} nib's geometry, with a maximum body width of 12 CSS pixels across all materials.`,
+      width_variation: `${signature.width_change_count === 0 ? "This stroke holds pressure at 1× because its stability is below 0.02; its material still shapes the outline." : `This stroke has ${signature.width_change_count} pronounced press/lift transitions: ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}. Its pressure peak-to-valley contrast is ${(Math.max(...signature.width_profile) / Math.min(...signature.width_profile)).toFixed(1)}:1, smoothly interpolated without mean normalization.`} The centerline is unchanged; physical width stays inside the material's 12-pixel cap.`,
+      crossings: `Actual centerline crossings: ${actualCrossings}. Maximum permitted: ${crossingBudget}, derived from entropy ${m.entropy.toFixed(2)} and ${signature.length_class} length. ${family} uses only the intersections natural to its complete route; unused budget does not add loops. Counted before bounded corner rounding.`,
+      brush_head: `${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} The original ${signature.brush_heads.join(" + ")} primitive-head metadata remains inspectable without stamping detached shapes onto the route.`,
       color_system: `${signature.color_count} seeded-random pigment${signature.color_count === 1 ? " is" : "s are"} used (${hueList}). Stops are equally spaced and interpolated by travelled distance, so refreshes preserve this artwork's palette.`,
-      draw_speed: `This stroke has ${signature.speed_profile.length} temporal phases spanning ${speedRange}, derived from per-anchor dwell times.`,
-      turn_system: `${signature.turn_count} principal turn${signature.turn_count === 1 ? "" : "s"}, ${signature.turn_angle_deg.toFixed(0)}° direction change and ${signature.turn_sharpness.toFixed(2)} sharpness define this stroke's corner state.`,
-      direction_system: `Drift bias ${fmtSigned(stroke?.mood?.drift_bias ?? 0)} rotates this stroke to ${signature.direction_angle_deg.toFixed(0)}°. Motion variation adds ${signature.reversal_count} laterally separated U-turn${signature.reversal_count === 1 ? "" : "s"}, all on the same centreline.`,
+      draw_speed: `This meteor travels through ${signature.speed_profile.length} phases with relative speed weights ${signature.speed_profile.map((value) => value.toFixed(2)).join(" → ")}, derived from per-anchor dwell times. Each phase covers an equal share of the route; a larger weight takes less time.`,
+      drawing_duration: timing ? `${m.duration}ms of recorded dwell and average intensity ${m.intensity.toFixed(2)} produce a ${fmtTime(timing.durationMs)} reveal at 1×. Playback speed changes the viewing rate; the original timing remains part of this stroke.` : "",
+      turn_system: `The turn budget is ${motion?.turnBudget ?? signature.turn_count}, interpreted by ${family.toLowerCase()} rather than forced into identical corners. Source angle is ${signature.turn_angle_deg.toFixed(0)}°; sharpness ${signature.turn_sharpness.toFixed(2)} determines bounded local rounding. ${MOTION_EFFECTS[pattern]}`,
+      direction_system: `Drift bias ${fmtSigned(stroke?.mood?.drift_bias ?? 0)} rotates the complete ${family.toLowerCase()} to ${signature.direction_angle_deg.toFixed(0)}°. Its return budget is ${motion?.reversalBudget ?? signature.reversal_count}, not an exact U-turn count. ${MOTION_EFFECTS[pattern]}`,
     };
-  }, [m, signature]);
+  }, [m, signature, timing, stroke, motion, travelledDistance]);
 
   const semanticAnchors = useMemo(
     () => [...new Set((stroke?.points ?? []).map((p) => p.anchor).filter(Boolean))],
     [stroke],
   );
-
-  const replay = useCallback(() => setReplayKey((k) => k + 1), []);
 
   if (status === "loading") {
     return <Shell title={id}><div className="sd-state">loading stroke…</div></Shell>;
@@ -311,99 +365,63 @@ export default function StrokeDetailPage() {
     return <Shell title={id}><div className="sd-state">Stroke “{id}” not found.</div></Shell>;
   }
 
-  const ts = stroke.timestamp ?? stroke.created_at;
   const agentName = agent?.name ?? stroke.agent_id;
   const cat = agent ? categoryLabel(agent.category) : "—";
 
   // ---- Layer 3 (causal) narrative + chain, derived from the parameters -----
-  const high = (v: number) => v > 0.55;
   const why: { title: string; text: string }[] = [
     {
       title: "Why this agent produced this shape",
-      text: `${agentName}${agent ? ` (${agent.occupation}, ${cat})` : ""} realizes the transition "${stroke.from}" → "${stroke.to}" through a "${stroke.motion_type}" motion archetype tied to its economic function, so the path is shaped accordingly rather than drawn arbitrarily.`,
+      text: `${agentName}${agent ? ` (${agent.occupation}, ${cat})` : ""} records the transition "${stroke.from}" → "${stroke.to}". Its ${stroke.geometry_mode ?? "linear"} geometry selects ${MOTION_LABELS[motion?.pattern ?? "glide"].toLowerCase()}; source attributes then shape that family. The recorded "${stroke.motion_type}" archetype is provenance, not a reason to replace every family with loops.`,
     },
     {
       title: "How entropy influenced structure",
-      text: high(m.entropy)
-        ? `High entropy (${m.entropy.toFixed(2)}) roughened the trajectory and raised branching probability — producing frayed, exploratory geometry.`
-        : `Low entropy (${m.entropy.toFixed(2)}) kept the path clean and deterministic, with little divergence or noise.`,
+      text: `Entropy ${m.entropy.toFixed(2)} contributes to lateral amplitude and sets a crossing ceiling of ${motion?.crossingBudget ?? 0}. This ${MOTION_LABELS[motion?.pattern ?? "glide"].toLowerCase()} uses ${motion?.crossingsUsed ?? 0} actual centerline intersections. Unused budget stays unused; the head still follows one unbranched route.`,
     },
     {
-      title: "How confidence affected determinism vs. exploration",
-      text: high(m.confidence)
-        ? `High confidence (${m.confidence.toFixed(2)}) reduced path divergence — the stroke commits to a bright, direct route.`
-        : `Lower confidence (${m.confidence.toFixed(2)}) permitted exploratory divergence and dimmer, more tentative travel.`,
+      title: "How confidence shapes movement and material",
+      text: `Average confidence ${m.confidence.toFixed(2)} reduces the lateral-exploration signal while contributing${signature ? ` to ${(signature.width_ratio * 100).toFixed(2)}% source width` : " to source width"}. Local confidence also consolidates material edges. It does not independently set the animation clock.`,
     },
     {
-      title: "How duration affected stroke continuity",
-      text: `A total dwell of ${m.duration}ms across ${m.n} anchors ${m.duration > 3000 ? "elongates the stroke into a long, continuous flow" : "yields a shorter, more clipped gesture"}.`,
+      title: "How duration controls the reveal",
+      text: `A total dwell of ${m.duration}ms across ${m.n} anchors and average intensity ${m.intensity.toFixed(2)} determine ${timing ? `a ${fmtTime(timing.durationMs)} reveal at 1×` : "the reveal duration"}. Recorded phase speeds make the head accelerate or linger along the same route.`,
     },
     {
       title: "How mood interacted with geometry / motion models",
       text: stroke.mood
-        ? `Sampled under a mood of curvature ${fmtSigned(stroke.mood.curvature_bias)}, drift ${fmtSigned(stroke.mood.drift_bias)}, motion ${stroke.mood.motion_variation.toFixed(2)} — which selected the "${stroke.geometry_mode}" geometry, "${stroke.branching_model}" branching and "${stroke.motion_model}" motion models.`
+        ? `Curvature bias ${fmtSigned(stroke.mood.curvature_bias)} sets the local bend/winding side; drift ${fmtSigned(stroke.mood.drift_bias)} sets global orientation; motion ${stroke.mood.motion_variation.toFixed(2)} gives a return budget of ${motion?.reversalBudget ?? 0}. The recorded ${stroke.motion_model ?? "continuous"} motion model contributes source pacing; ${stroke.branching_model ?? "none"} branching remains source metadata, not visible branches.`
         : `No mood was recorded; structural modes resolve to ${stroke.geometry_mode ?? "—"} / ${stroke.branching_model ?? "—"} / ${stroke.motion_model ?? "—"}.`,
     },
     ...(signature ? [{
-      title: "How the seven visual variables stay explainable",
-      text: `This is not an independent random style layer: ${signature.length.toFixed(2)}× length comes from ${m.n} semantic anchors and ${m.duration}ms dwell; ${signature.crossings} crossings come from entropy ${m.entropy.toFixed(2)}, with the 5–8 tier available only to long strokes; motion ${m.motionVariation.toFixed(2)} and the length gate select ${signature.color_count} seeded-random colors; ${signature.brush_heads.join(" + ")} heads come from the structural modes.`,
+      title: "How the meteor retains its source attributes",
+      text: `Source length ${signature.length.toFixed(2)} produces a ${signature.length_class} gesture travelling ${travelledDistance.toFixed(3)} normalized square-canvas units before corner rounding. Its ${MOTION_LABELS[motion?.pattern ?? "glide"].toLowerCase()} family is preserved with ${motion?.crossingsUsed ?? 0} crossings under a ${motion?.crossingBudget ?? 0} ceiling. Motion and length select ${signature.color_count} seeded colors. ${MATERIAL_EFFECTS[signature.brush_style]}`,
     }] : []),
   ];
 
   const chain: { input: string; effect: string }[] = [
-    { input: `entropy (${m.entropy.toFixed(2)})`, effect: high(m.entropy) ? "increases branching probability + edge diffusion" : "keeps geometry clean + deterministic" },
-    { input: `confidence (${m.confidence.toFixed(2)})`, effect: high(m.confidence) ? "reduces path divergence (direct route)" : "permits exploratory divergence" },
-    { input: `duration (${m.duration}ms)`, effect: m.duration > 3000 ? "elongates stroke continuity" : "compresses the stroke into a burst" },
-    { input: `path intensity (${m.intensity.toFixed(2)})`, effect: signature ? `selects the ${signature.brush_style} instrument` : "selects a drawing instrument" },
-    { input: `curvature (${m.curvature.toFixed(2)})`, effect: m.curvature > 0.4 ? "bends the trajectory into arcs" : "holds a near-linear path" },
-    { input: `branching density (${m.branching.toFixed(2)})`, effect: m.branching > 0.2 ? "adds brush-head complexity while preserving one gesture" : "keeps a simple single gesture" },
+    { input: `geometry_mode: ${stroke.geometry_mode ?? "linear"}`, effect: `selects ${MOTION_LABELS[motion?.pattern ?? "glide"].toLowerCase()}, never overridden by the crossing ceiling` },
+    { input: `entropy (${m.entropy.toFixed(2)})`, effect: "increases lateral amplitude and the permitted crossing ceiling; also affects material dryness" },
+    { input: `confidence (${m.confidence.toFixed(2)})`, effect: "restrains lateral movement, consolidates material edges and contributes to source width" },
+    { input: `dwell ${m.duration}ms + intensity ${m.intensity.toFixed(2)}`, effect: timing ? `sets a ${fmtTime(timing.durationMs)} reveal at 1×` : "sets the meteor reveal duration" },
+    { input: `path intensity (${m.intensity.toFixed(2)})`, effect: signature ? `selects the ${signature.brush_style} brush material` : "selects the brush material" },
+    { input: `curvature (${m.curvature.toFixed(2)})`, effect: "contributes to the recorded source turn-angle descriptor" },
+    { input: `branching density (${m.branching.toFixed(2)})`, effect: "retained as source metadata; the meteor remains one unbranched centerline" },
     ...(signature ? [
-      { input: `depth ${m.n} + dwell ${m.duration}ms`, effect: `derives ${signature.length.toFixed(2)}× canvas-side line length` },
+      { input: `depth ${m.n} + dwell ${m.duration}ms`, effect: `derives source length ${signature.length.toFixed(2)}; actual centerline distance ${travelledDistance.toFixed(3)} normalized units` },
+      { input: `entropy + (1 − confidence) + |curvature bias|`, effect: `weighted 0.62 / 0.23 / 0.15 → movement amplitude ${(signature.motion_amplitude ?? 0).toFixed(3)}` },
       { input: `intensity + confidence − entropy`, effect: `derives ${(signature.width_ratio * 100).toFixed(2)}% width and ${signature.color_temperature >= 0 ? "warm" : "cold"} temperature` },
       { input: `motion stability ${m.stability.toFixed(2)}`, effect: `creates ${signature.width_change_count} seeded thickness change${signature.width_change_count === 1 ? "" : "s"}: ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}` },
-      { input: `entropy + length tier`, effect: `derives ${signature.crossings} deliberate crossings (maximum 8)` },
+      { input: `entropy + length tier`, effect: `permits at most ${motion?.crossingBudget ?? signature.crossings} crossings; this centerline actually uses ${motion?.crossingsUsed ?? 0}` },
       { input: `motion ${m.motionVariation.toFixed(2)} + ${signature.length_class} length`, effect: `selects ${signature.color_count} evenly spaced random color stop${signature.color_count === 1 ? "" : "s"}` },
-      { input: `drift ${fmtSigned(stroke.mood?.drift_bias ?? 0)} + motion ${m.motionVariation.toFixed(2)}`, effect: `rotates travel to ${signature.direction_angle_deg.toFixed(0)}° and creates ${signature.reversal_count} continuous U-turn${signature.reversal_count === 1 ? "" : "s"}` },
-      { input: `${stroke.geometry_mode} + ${stroke.motion_model}`, effect: `adds ${signature.brush_heads.join(" + ")} head structure and ${signature.speed_profile.length} duration-led phases` },
+      { input: `drift ${fmtSigned(stroke.mood?.drift_bias ?? 0)} + motion ${m.motionVariation.toFixed(2)}`, effect: `rotates the complete family to ${signature.direction_angle_deg.toFixed(0)}° with return budget ${motion?.reversalBudget ?? signature.reversal_count}` },
+      { input: `per-anchor dwell times`, effect: `create ${signature.speed_profile.length} relative speed phases along the meteor route` },
     ] : []),
   ];
 
   return (
     <Shell title={`${stroke.from} → ${stroke.to}`}>
       <div className="sd-content">
-        {/* 1 · HEADER */}
-        <section className="panel sd-section sd-header">
-          <div className="sd-h-route">
-            <b>{stroke.from}</b><span className="sd-h-arrow">→</span><b>{stroke.to}</b>
-          </div>
-          <div className="sd-h-meta">
-            <span>agent <b>{agentName}</b></span>
-            <span>{cat}</span>
-            <span>motion <b>{stroke.motion_type}</b></span>
-            <span>{new Date(ts).toLocaleString()}</span>
-          </div>
-          <code className="sd-h-id">{stroke.id}</code>
-        </section>
-
-        {/* replay preview (visualization) */}
-        <section className="panel sd-section">
-          <div className="panel-head">
-            <h2>Stroke Replay</h2>
-            <button className="mini regen" onClick={replay} title="Replay the stroke animation">↺ Replay</button>
-          </div>
-          <div className="sd-canvas">
-            <CanvasView
-              key={replayKey}
-              paths={previewPaths}
-              agents={previewAgents}
-              selectedStrokeId={null}
-              filterAgentId={null}
-              editMode={false}
-              onSelectStroke={noop}
-              onTransformCommit={noop}
-            />
-          </div>
-        </section>
+        <StrokePlayerPanel stroke={stroke} agent={agent} />
 
         {/* 2 + 3 · CORE GENERATIVE ATTRIBUTES (click a row to inspect) */}
         <section className="panel sd-section">
@@ -451,16 +469,17 @@ export default function StrokeDetailPage() {
               <div className="sd-mood">
                 <span title="extra path randomness">entropy_shift {fmtSigned(stroke.mood.entropy_shift)}</span>
                 <span title="directional drift">drift_bias {fmtSigned(stroke.mood.drift_bias)}</span>
-                <span title="curvature style">curvature_bias {fmtSigned(stroke.mood.curvature_bias)}</span>
-                <span title="animation pacing">motion_variation {stroke.mood.motion_variation.toFixed(2)}</span>
-                <span title="hue shift">color_variation {fmtSigned(stroke.mood.color_variation)}</span>
+                <span title="bend/winding direction and amplitude contribution">curvature_bias {fmtSigned(stroke.mood.curvature_bias)}</span>
+                <span title="motion-family return budget and length-gated palette size">motion_variation {stroke.mood.motion_variation.toFixed(2)}</span>
+                <span title="source color-temperature metadata; the displayed palette uses a creation seed">color_variation {fmtSigned(stroke.mood.color_variation)}</span>
               </div>
             ) : <p className="sd-muted">no mood recorded for this stroke.</p>}
 
             <dl className="sd-modes">
-              <div><dt>geometry_mode</dt><dd><b>{stroke.geometry_mode ?? "—"}</b> · defines the global geometric structure of the stroke path</dd></div>
-              <div><dt>branching_model</dt><dd><b>{stroke.branching_model ?? "—"}</b> · controls divergence structure along the semantic trajectory</dd></div>
-              <div><dt>motion_model</dt><dd><b>{stroke.motion_model ?? "—"}</b> · defines the temporal animation behaviour of the stroke</dd></div>
+              <div><dt>geometry_mode</dt><dd><b>{stroke.geometry_mode ?? "linear"} → {MOTION_LABELS[motion?.pattern ?? "glide"]}</b> · {MOTION_EFFECTS[motion?.pattern ?? "glide"]}</dd></div>
+              <div><dt>crossing budget</dt><dd><b>{motion?.crossingsUsed ?? 0} actual / {motion?.crossingBudget ?? 0} maximum</b> · counts the generated centerline; unused budget never inserts loops</dd></div>
+              <div><dt>branching_model</dt><dd><b>{stroke.branching_model ?? "—"}</b> · source semantic metadata; the displayed trajectory remains one unbranched stroke</dd></div>
+              <div><dt>motion_model</dt><dd><b>{stroke.motion_model ?? "—"}</b> · contributes to recorded anchor pacing, which becomes the relative phase-speed profile</dd></div>
               <div><dt>semantic_depth</dt><dd><b>{stroke.semantic_depth ?? "—"}</b> · number of anchors the mood restructured the path to</dd></div>
             </dl>
           </div>

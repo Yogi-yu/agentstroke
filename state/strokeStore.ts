@@ -15,7 +15,7 @@ import { FLOATS_PER_INSTANCE } from "@/render/strokeGeometry";
 import { buildStrokeBlock, type BlockOpts, type StrokeBlock } from "@/engine/geometryUpdater";
 import { TransformStore, IDENTITY_TRANSFORM } from "@/store/transformStore";
 import { StrokeHitmap } from "@/canvas/StrokeHitmap";
-import { pathCentroid, transformedCentroid, type XY } from "@/engine/strokeMutation";
+import { centroidOf, type XY } from "@/engine/strokeMutation";
 
 interface Entry {
   id: string;
@@ -148,7 +148,9 @@ export class StrokeStore {
   pivotOf(id: string): XY | null {
     const e = this.byId.get(id);
     if (!e) return null;
-    return transformedCentroid(this.transforms.get(id), pathCentroid(e.path.points));
+    // Geometry transforms rotate about the visual route's centroid, which can
+    // differ from the semantic source points after folding/length mapping.
+    return centroidOf(e.block.controlPoints);
   }
 
 }

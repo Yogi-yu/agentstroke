@@ -17,12 +17,13 @@ import {
   updateStrokeTransform,
 } from "@/lib/store";
 import type { StrokeTransform } from "@/lib/types";
+import { canvasRevision } from "@/lib/skyBatchStore";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  return NextResponse.json({ strokes: listStrokes() });
+  return NextResponse.json({ strokes: listStrokes(), canvasRevision: canvasRevision() }, { headers: { "Cache-Control": "no-store" } });
 }
 
 function isTransform(v: unknown): v is StrokeTransform {
@@ -63,5 +64,5 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ deleted: true, id });
   }
   const removed = clearStrokes();
-  return NextResponse.json({ cleared: true, removed });
+  return NextResponse.json({ cleared: true, removed, canvasRevision: canvasRevision() });
 }

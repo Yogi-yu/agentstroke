@@ -12,12 +12,13 @@
 // Reads from appStore (which the parent route bootstraps) — single source of truth.
 // ============================================================================
 
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import CanvasView from "@/components/CanvasView";
 import AgentCreationForm from "@/components/AgentCreationForm";
 import AgentChatPanel from "@/components/AgentChatPanel";
+import StrokePlayerPanel from "@/components/StrokePlayerPanel";
 import type { Agent } from "@/lib/types";
 import { agentRenderStyle, categoryLabel } from "@/lib/agents";
 import { modelSpec } from "@/lib/openrouter/models";
@@ -29,13 +30,37 @@ export default function AgentDetailMobile({ id }: { id: string }) {
   const router = useRouter();
   const { agents, strokes, ready, generating } = useApp();
   const agent = agents.find((a) => a.id === id) ?? null;
-  const agentStrokes = strokes.filter((s) => s.agent_id === id);
-  const renderAgents: Agent[] = agent ? [{ id: agent.id, style: agentRenderStyle(agent.category) }] : [];
+  const agentStrokes = useMemo(() => strokes.filter((s) => s.agent_id === id), [strokes, id]);
+  const renderAgents = useMemo<Agent[]>(() => agent ? [{ id: agent.id, style: agentRenderStyle(agent.category) }] : [], [agent]);
 
   const [infoOpen, setInfoOpen] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [confirmDeleteAgent, setConfirmDeleteAgent] = useState(false);
+  const [strokesOpen, setStrokesOpen] = useState(false);
+  const [previewStrokeId, setPreviewStrokeId] = useState<string | null>(null);
+  const previewStroke = agentStrokes.find((stroke) => stroke.id === previewStrokeId) ?? null;
+
+  useEffect(() => {
+    setStrokesOpen(false);
+    setPreviewStrokeId(null);
+    setInfoOpen(false);
+    setChatOpen(false);
+    setSheetOpen(false);
+  }, [id]);
+
+  const closePlayback = useCallback(() => {
+    setStrokesOpen(false);
+    setPreviewStrokeId(null);
+  }, []);
+
+  const onSelectStroke = useCallback((strokeId: string | null) => {
+    if (!strokeId) return;
+    setPreviewStrokeId(strokeId);
+    setStrokesOpen(true);
+    setInfoOpen(false);
+    setChatOpen(false);
+  }, []);
 
   const onCreate = (from: string, to: string) => {
     if (!agent) return;
@@ -53,7 +78,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
           selectedStrokeId={null}
           filterAgentId={null}
           editMode={false}
-          onSelectStroke={noop}
+          onSelectStroke={onSelectStroke}
           onTransformCommit={noop}
         />
       </div>
@@ -69,7 +94,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
         </div>
         <button
           className="adm-btn adm-info-toggle"
-          onClick={() => setChatOpen(true)}
+          onClick={() => { closePlayback(); setInfoOpen(false); setChatOpen(true); }}
           disabled={!agent}
           aria-label="Open chat"
         >
@@ -77,7 +102,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
         </button>
         <button
           className="adm-btn adm-info-toggle"
-          onClick={() => setInfoOpen((v) => !v)}
+          onClick={() => { closePlayback(); setInfoOpen((v) => !v); }}
           aria-expanded={infoOpen}
           disabled={!agent}
         >
@@ -100,9 +125,32 @@ export default function AgentDetailMobile({ id }: { id: string }) {
         </div>
       )}
 
+      {strokesOpen && (
+        <div className="adm-stroke-panel">
+          {previewStroke ? (
+            <StrokePlayerPanel stroke={previewStroke} agent={agent} onClose={closePlayback} strokeOptions={agentStrokes} onSelectStroke={onSelectStroke} />
+          ) : (
+            <section className="panel agent-stroke-list">
+              <div className="panel-head"><h2>Strokes · {agentStrokes.length}</h2><button type="button" className="sd-playback-button" onClick={closePlayback} aria-label="Close stroke list">Close ✕</button></div>
+              <div className="agent-stroke-options" aria-label="Agent strokes">
+                {agentStrokes.length ? [...agentStrokes].reverse().map((stroke) => (
+                  <button type="button" key={stroke.id} className="agent-stroke-option" onClick={() => onSelectStroke(stroke.id)}>
+                    <span>{stroke.from} <span aria-hidden="true">→</span> {stroke.to}</span>
+                    <small>{stroke.motion_type} · {new Date(stroke.timestamp ?? stroke.created_at).toLocaleTimeString("en-US", { hour12: false })}</small>
+                  </button>
+                )) : <p className="agent-stroke-empty">Create a stroke to watch its journey here.</p>}
+              </div>
+            </section>
+          )}
+        </div>
+      )}
+
       {/* SECTION 2 — STICKY ACTION BAR (always visible) */}
       <div className="adm-actionbar">
-        <button className="adm-create" disabled={!agent} onClick={() => setSheetOpen(true)}>
+        <button type="button" className="adm-btn adm-strokes-toggle" aria-expanded={strokesOpen} onClick={() => { setStrokesOpen((value) => !value); setPreviewStrokeId(null); setInfoOpen(false); }}>
+          Strokes ({agentStrokes.length})
+        </button>
+        <button className="adm-create" disabled={!agent} onClick={() => { closePlayback(); setInfoOpen(false); setSheetOpen(true); }}>
           ✦ Create Stroke
         </button>
       </div>

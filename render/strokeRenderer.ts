@@ -181,7 +181,8 @@ export class StrokeRenderer {
   }
 
   private regenStars(w: number, h: number) {
-    const count = Math.min(1400, Math.floor((w * h) / 6000));
+    // Density is based on CSS pixels, so Retina does not quadruple the stars.
+    const count = Math.min(900, Math.max(70, Math.floor((w * h) / (this.dpr * this.dpr * 2200))));
     const arr = new Float32Array(count * 5);
     let a = 0x1234567;
     const rng = () => {
@@ -195,8 +196,8 @@ export class StrokeRenderer {
       const o = i * 5;
       arr[o] = rng();
       arr[o + 1] = rng();
-      arr[o + 2] = rng() * 1.6 + 0.4;
-      arr[o + 3] = rng() * 0.5 + 0.12;
+      arr[o + 2] = 0.8 + Math.pow(rng(), 3) * 2.1;
+      arr[o + 3] = rng() * 0.46 + 0.2;
       arr[o + 4] = rng() * Math.PI * 2;
     }
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.starVbo);

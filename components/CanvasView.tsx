@@ -3,7 +3,13 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type { Agent, StrokeTransform, TransitionPath } from "@/lib/types";
 import { StrokeRenderer } from "@/render/strokeRenderer";
-import { NaturalBrushRenderer } from "@/render/naturalBrushRenderer";
+import { MeteorRenderer } from "@/render/meteorRenderer";
+import { getStrokePlayback, strokeDistanceAtTime, type StrokePlaybackTiming } from "@/engine/strokePlayback";
+import { hashStr } from "@/simulation/rng";
+import { skyDisplayView, type SkyDisplayBox } from "@/engine/skyLayout";
+import { canvasPresentation, type CanvasDisplayMode } from "@/engine/canvasPresentation";
+import { strokeDisplayView } from "@/engine/strokeDisplayView";
+import { ANIMATED_TRAIL_RETENTION, clampTrailRetention } from "@/engine/meteorTrail";
 import { StrokeStore } from "@/state/strokeStore";
 import { StrokeEditor } from "@/canvas/StrokeEditor";
 import { IDENTITY_TRANSFORM } from "@/store/transformStore";
@@ -41,6 +47,21 @@ interface Props {
   onTransformCommit: (id: string, t: StrokeTransform) => void;
   /** Touch-first: long-pressing a stroke requests entering edit mode on it. */
   onRequestEdit?: (id: string) => void;
+  /** Presentation-only positions for a multi-agent sky; never persisted. */
+  displayLayout?: ReadonlyMap<string, SkyDisplayBox>;
+  /** Static reveals every stroke completely, with a frozen star background. */
+  displayMode?: CanvasDisplayMode;
+  /** Live Animated tail preference, independent of the stroke's own attributes. */
+  trailRetention?: number;
+  /** Controlled time fraction. Omit for the continuously animated star field. */
+  playback?: {
+    progress: number;
+    playing: boolean;
+    speed: number;
+    /** Increment when seeking or replaying to reset the independent clock. */
+    replayKey: number;
+    onProgress: (progress: number) => void;
+  };
 }
 
 const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
@@ -52,6 +73,10 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   onSelectStroke,
   onTransformCommit,
   onRequestEdit,
+  playback,
+  displayLayout,
+  displayMode = "animated",
+  trailRetention = ANIMATED_TRAIL_RETENTION,
 }: Props, ref) {
   useImperativeHandle(ref, () => ({
     resetTransform(id: string) {
@@ -74,7 +99,11 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const brushCanvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<StrokeRenderer | null>(null);
-  const brushRendererRef = useRef<NaturalBrushRenderer | null>(null);
+  const brushRendererRef = useRef<MeteorRenderer | null>(null);
+  const playbackRef = useRef(playback);
+  const displayLayoutRef = useRef(displayLayout);
+  const displayModeRef = useRef(displayMode);
+  const trailRetentionRef = useRef(clampTrailRetention(trailRetention));
   const storeRef = useRef<StrokeStore>(new StrokeStore());
   const editorRef = useRef<StrokeEditor | null>(null);
   const selIdRef = useRef<string | null>(selectedStrokeId);
@@ -99,33 +128,27 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   editRef.current = editMode;
   pathsRef.current = paths;
   agentsRef.current = agents;
+  playbackRef.current = playback;
+  displayLayoutRef.current = displayLayout;
+  displayModeRef.current = displayMode;
+  trailRetentionRef.current = clampTrailRetention(trailRetention);
 
   // mount renderer + animation loop
   useEffect(() => {
     const canvas = canvasRef.current;
     const brushCanvas = brushCanvasRef.current;
     if (!canvas || !brushCanvas) return;
-    let disposed = false;
     let renderer: StrokeRenderer;
     try {
       renderer = new StrokeRenderer(canvas);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "WebGL init failed");
+    } catch {
+      setError("Could not initialize the WebGL2 renderer. Check your browser and graphics settings.");
       return;
     }
     rendererRef.current = renderer;
     editorRef.current = new StrokeEditor(storeRef.current);
 
-    void import("p5.brush/standalone")
-      .then((brush) => {
-        if (disposed) return;
-        brushRendererRef.current = new NaturalBrushRenderer(brushCanvas, brush);
-        resize();
-        brushDirtyRef.current = true;
-      })
-      .catch((e: unknown) => {
-        if (!disposed) setError(e instanceof Error ? e.message : "Natural brush renderer failed");
-      });
+    brushRendererRef.current = new MeteorRenderer(brushCanvas);
 
     const resize = () => {
       const parent = canvas.parentElement;
@@ -141,42 +164,166 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     if (canvas.parentElement) ro.observe(canvas.parentElement);
     resize();
 
-    // The original renderer now owns only the animated star field. Natural
-    // marks are drawn by p5.brush on the transparent overlay canvas.
+    // Stars and meteor ribbons use separate layers; both share the same clock
+    // in controlled playback so a paused frame remains completely still.
     renderer.upload(new Float32Array(0), 0);
     lastStructRev.current = storeRef.current.structureRevision;
 
     let raf = 0;
-    let lastBrushFrame = 0;
+    let previousTime = 0;
+    let initialPaths = true;
+    let controlledClock: { id: string; key: number; progress: number } | null = null;
+    const flights = new Map<string, { elapsed: number; timing: StrokePlaybackTiming }>();
+    const distances = new Map<string, number>();
+    const opacities = new Map<string, number>();
+    let fittedControls: ReturnType<StrokeStore["controlPointsOf"]> | null = null;
+    let fittedView = { ...DEFAULT_CANVAS_TRANSFORM };
+    let layoutSource: ReadonlyMap<string, SkyDisplayBox> | undefined;
+    let layoutRevision = -1;
+    const layoutViews = new Map<string, CanvasTransformState>();
+    const readableViews = new Map<string, CanvasTransformState>();
+    let lastPresentation: ReturnType<typeof canvasPresentation> | null = null;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const visibilityChanged = () => { previousTime = 0; };
+    document.addEventListener("visibilitychange", visibilityChanged);
     const loop = (now: number) => {
+      const delta = previousTime === 0 ? 0 : Math.max(0, now - previousTime);
+      previousTime = now;
       const store = storeRef.current;
       const d = store.takeDirty();
       if (d) brushDirtyRef.current = true;
-      renderer.render(now, -1, -1, viewRef.current);
-      // The material stroke itself is alive. Re-render at a deliberately calm
-      // cadence so its spline, pressure and wetness evolve as one object.
-      if (brushRendererRef.current && (brushDirtyRef.current || now - lastBrushFrame >= 55)) {
+      const controls = playbackRef.current;
+      const layout = displayLayoutRef.current;
+      const presentation = canvasPresentation({
+        displayMode: displayModeRef.current,
+        controlled: !!controls,
+        editing: editRef.current,
+        reducedMotion: reducedMotion.matches,
+        arranged: !!layout,
+      });
+      const visiblePaths = pathsRef.current;
+      if (layout !== layoutSource || layoutRevision !== store.structureRevision || d) {
+        brushDirtyRef.current = true;
+        layoutViews.clear();
+        layoutSource = layout;
+        layoutRevision = store.structureRevision;
+        if (layout) for (const path of visiblePaths) {
+          const box = layout.get(path.id);
+          if (box) layoutViews.set(path.id, skyDisplayView(store.controlPointsOf(path.id), box));
+        }
+      }
+      const unchangedStatic = presentation === "static" && lastPresentation === "static" && !brushDirtyRef.current;
+      lastPresentation = presentation;
+      if (unchangedStatic) {
+        // Static mode is also inexpensive: don't repaint an identical material
+        // surface on every frame. Data, resize, selection or edits invalidate it.
+        raf = requestAnimationFrame(loop);
+        return;
+      }
+      if (!controls && !layout && brushDirtyRef.current) {
+        readableViews.clear();
+        const viewport = { width: canvas.clientWidth, height: canvas.clientHeight };
+        for (const path of visiblePaths) {
+          readableViews.set(path.id, strokeDisplayView(
+            store.controlPointsOf(path.id), store.transformOf(path.id), viewport, viewRef.current,
+          ));
+        }
+      }
+      const ids = new Set(visiblePaths.map((path) => path.id));
+      for (const id of flights.keys()) if (!ids.has(id)) flights.delete(id);
+      distances.clear();
+      opacities.clear();
+      let frameTime = presentation === "static" || reducedMotion.matches ? 0 : now;
+      for (const path of visiblePaths) {
+        let flight = flights.get(path.id);
+        if (!flight) {
+          const timing = getStrokePlayback(path);
+          // Existing constellations have staggered arrivals. New creations
+          // always start at zero when they first enter this canvas.
+          const age = Date.now() - path.created_at;
+          const elapsed = !layout && initialPaths && age > 30000
+            ? (hashStr(path.id) % 1000) / 1000 * timing.durationMs : 0;
+          flight = { elapsed, timing };
+          flights.set(path.id, flight);
+        }
+        let timeProgress: number;
+        if (presentation === "static" || presentation === "complete") {
+          timeProgress = 1;
+        } else if (controls) {
+          const reset = !controlledClock || controlledClock.id !== path.id || controlledClock.key !== controls.replayKey;
+          if (reset) {
+            controlledClock = { id: path.id, key: controls.replayKey, progress: controls.progress };
+          }
+          // Accumulate independently of React commits: slow UI renders must
+          // not drop elapsed frames or change a stroke's intrinsic duration.
+          const clock = controlledClock!;
+          clock.progress = Math.max(0, Math.min(1, !controls.playing
+            ? controls.progress
+            : clock.progress + (reset ? 0 : delta * controls.speed / flight.timing.durationMs)));
+          timeProgress = clock.progress;
+          frameTime = timeProgress * flight.timing.durationMs;
+          if (controls.playing && path === visiblePaths[0]) controls.onProgress(timeProgress);
+        } else if (presentation === "sky") {
+          // A comparison sky keeps all ten results visible after arrival.
+          // Replaying it resets only this local clock, not model generation.
+          flight.elapsed += delta;
+          timeProgress = Math.min(1, flight.elapsed / flight.timing.durationMs);
+        } else {
+          flight.elapsed += delta;
+          const cycle = flight.timing.durationMs + 1800;
+          const cycleTime = flight.elapsed % cycle;
+          timeProgress = Math.min(1, cycleTime / flight.timing.durationMs);
+          // Let the arrived meteor burn out before its next flight, instead
+          // of keeping a stationary dot and abruptly deleting the whole trail.
+          const fade = Math.max(0, Math.min(1, (cycleTime - flight.timing.durationMs) / 1400));
+          const arrival = Math.min(1, cycleTime / 180);
+          opacities.set(path.id, arrival * (1 - fade * fade * (3 - 2 * fade)));
+        }
+        distances.set(path.id, strokeDistanceAtTime(timeProgress, flight.timing));
+      }
+      if (visiblePaths.length) initialPaths = false;
+      let renderView = viewRef.current;
+      if (controls && visiblePaths[0]) {
+        const points = store.controlPointsOf(visiblePaths[0].id);
+        if (points !== fittedControls) {
+          fittedControls = points;
+          if (points.length) {
+            const xs = points.map((point) => point.x);
+            const ys = points.map((point) => point.y);
+            const minX = Math.min(...xs), maxX = Math.max(...xs);
+            const minY = Math.min(...ys), maxY = Math.max(...ys);
+            const scale = Math.min(12, 0.78 / Math.max(0.001, maxX - minX), 0.66 / Math.max(0.001, maxY - minY));
+            fittedView = { scale, translateX: 0.5 - (minX + maxX) * 0.5 * scale, translateY: 0.5 - (minY + maxY) * 0.5 * scale };
+          }
+        }
+        renderView = fittedView;
+      }
+      renderer.render(frameTime, -1, -1, renderView);
+      if (brushRendererRef.current) {
         brushRendererRef.current.draw(
-          now,
+          frameTime,
           pathsRef.current,
           agentsRef.current,
           store,
           selIdRef.current,
           filterAgentRef.current,
-          viewRef.current,
+          renderView,
+          distances,
+          { retainTrace: presentation !== "animated", trailRetention: trailRetentionRef.current, opacityById: opacities,
+            viewById: controls ? undefined : layout ? layoutViews : readableViews },
         );
         brushDirtyRef.current = false;
-        lastBrushFrame = now;
       }
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
 
     return () => {
-      disposed = true;
       cancelAnimationFrame(raf);
+      document.removeEventListener("visibilitychange", visibilityChanged);
       ro.disconnect();
       renderer.dispose();
+      brushRendererRef.current?.dispose();
       rendererRef.current = null;
       brushRendererRef.current = null;
     };
@@ -206,7 +353,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
 
   useEffect(() => {
     brushDirtyRef.current = true;
-  }, [selectedStrokeId, filterAgentId]);
+  }, [selectedStrokeId, filterAgentId, !!playback, displayLayout, displayMode, trailRetention]);
 
   // ---- wheel / trackpad-pinch zoom (Edit Mode only) ----
   // Resizes the SELECTED stroke (persists), rather than a throwaway camera zoom.
@@ -240,6 +387,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     const midNorm = (a: Touch, b: Touch) =>
       toNorm((a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2);
     const onStart = (e: TouchEvent) => {
+      if (playbackRef.current) return;
       if (e.touches.length !== 2) return;
       e.preventDefault();
       clearLongPress(); // a second finger cancels any pending long-press-to-edit
@@ -248,6 +396,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
       lastAngle = angle(e.touches[0], e.touches[1]);
     };
     const onMove = (e: TouchEvent) => {
+      if (playbackRef.current) return;
       if (e.touches.length !== 2) return;
       e.preventDefault();
       const d = dist(e.touches[0], e.touches[1]);
@@ -326,8 +475,10 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   };
 
   // ---- pointer → normalized WORLD space (inverse of the view transform) ----
-  // CRITICAL: all stroke interaction (hit-test, drag, rotate) happens in world
-  // space so editing stays accurate under zoom/pan. world = (screen - t) / scale.
+  // Readability enlargement is centered on the moving stroke centroid: a drag
+  // still moves that centroid 1:1 through the common camera, and uniform local
+  // enlargement preserves rotation angles. Do not divide drag deltas by the
+  // readability gain. Hit-testing uses the renderer's actual per-stroke view.
   const toWorld = (clientX: number, clientY: number) =>
     screenToWorld(toNorm(clientX, clientY), viewRef.current);
 
@@ -429,7 +580,15 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   };
 
   const onCanvasPointerDown = (e: React.PointerEvent) => {
-    const store = storeRef.current;
+    // Player canvases are inspect-only: let vertical swipes scroll the panel.
+    if (playbackRef.current) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    // Pick the exact visible, rounded ribbon in screen pixels. The old
+    // control-point hitmap also selected invisible corners/future geometry.
+    const hit = brushRendererRef.current?.hitTest(
+      e.clientX - rect.left, e.clientY - rect.top, e.pointerType === "touch" ? 18 : 10,
+    ) ?? null;
 
     // EDIT MODE: this is a TRANSFORMED COORDINATE WORKSPACE.
     if (editRef.current) {
@@ -444,16 +603,12 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
       // strokes or empty canvas are ignored (and never exit edit mode).
       const editingId = selIdRef.current;
       if (!editingId) return;
-      const wp = toWorld(e.clientX, e.clientY); // inverse-transformed for accurate hit
-      const hit = store.hitTest(wp.x, wp.y);
       if (hit === editingId) beginGesture("drag", editingId, e.clientX, e.clientY);
       return; // swallow everything else — no focus/selection leakage
     }
 
     // VIEW MODE: tap selects the stroke; a long press over it enters edit mode
     // (touch-first). The select fires immediately so a quick tap still selects.
-    const wp = toWorld(e.clientX, e.clientY);
-    const hit = store.hitTest(wp.x, wp.y);
     onSelectStroke(hit);
 
     clearLongPress();
@@ -486,12 +641,14 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   if (editMode && selectedStrokeId && wrap) {
     const W = wrap.clientWidth;
     const H = wrap.clientHeight;
-    const v = viewRef.current;
+    const pts = store.controlPointsOf(selectedStrokeId);
+    const v = displayLayout?.get(selectedStrokeId)
+      ? skyDisplayView(pts, displayLayout.get(selectedStrokeId)!)
+      : strokeDisplayView(pts, store.transformOf(selectedStrokeId), { width: W, height: H }, viewRef.current);
     // The overlay lives in SCREEN space, so map each world control point through
     // the view transform: screen = world * scale + translate (then to px).
     const sx = (wx: number) => (wx * v.scale + v.translateX) * W;
     const sy = (wy: number) => (wy * v.scale + v.translateY) * H;
-    const pts = store.controlPointsOf(selectedStrokeId);
     const pivot = store.pivotOf(selectedStrokeId);
     if (pts.length && pivot) {
       const px = sx(pivot.x);
@@ -558,7 +715,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   const resetDisabled = strokeScale === 1 && isDefaultTransform(view);
 
   return (
-    <div ref={wrapRef} className="canvas-wrap">
+    <div ref={wrapRef} className="canvas-wrap" data-display-mode={displayMode}>
       <canvas
         ref={canvasRef}
         onPointerDown={onCanvasPointerDown}
@@ -566,14 +723,14 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
           display: "block",
           width: "100%",
           height: "100%",
-          cursor: editMode ? editCursor : "crosshair",
+          cursor: playback ? "default" : editMode ? editCursor : "crosshair",
           // never let the browser claim canvas touches → our pinch/pan + tap work
-          touchAction: "none",
+          touchAction: playback ? "pan-y" : "none",
         }}
       />
       <canvas
         ref={brushCanvasRef}
-        className="natural-brush-canvas"
+        className="meteor-canvas"
         aria-hidden="true"
       />
       {overlay}

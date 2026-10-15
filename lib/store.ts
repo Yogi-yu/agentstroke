@@ -6,15 +6,16 @@
 // the source of truth: it fetches this on load and re-syncs after every change.
 //
 //   roster — the immutable catalog of candidate economic agents (attraction src)
-//   pool   — the AVAILABLE agents (server-authoritative). Starts with 3 defaults;
+//   pool   — the AVAILABLE agents (server-authoritative). Starts with the release snapshot;
 //            grows as a posted task attracts more; shrinks on delete.
 // ============================================================================
 
 import type { AgentProfile, StrokeTransform, TransitionPath } from "@/lib/types";
 import { makeAgents } from "@/lib/agents";
+import { clearSkyBatches } from "@/lib/skyBatchStore";
+import { createPublishedCanvas } from "@/lib/publishedCanvas";
 
 const MAX_STROKES = 500; // ring-buffer cap to bound memory
-const DEFAULT_POOL_COUNT = 3; // economic agents present at system start
 
 interface State {
   roster: AgentProfile[]; // full catalog (candidates to attract from)
@@ -30,13 +31,16 @@ function state(): State {
   if (!g.__strokeState) {
     const roster = makeAgents();
     const now = Date.now();
-    // seed the 3 default agents; joined well in the past so they don't flag as
-    // freshly-attracted in the UI.
-    const pool = roster.slice(0, DEFAULT_POOL_COUNT).map((a) => ({ ...a, joined_at: now - 60_000 }));
+    // Seed once per process, preserving original author identities, timestamps,
+    // geometry, signatures and any saved edit transforms. An existing singleton
+    // (including a deliberately cleared one) is never replaced on hot reload.
+    const published = createPublishedCanvas();
+    const pool = published.agents;
+    const present = new Set(pool.map((agent) => agent.id));
     // every not-yet-present agent has been "out" since start (idle accrues).
     const lastOut: Record<string, number> = {};
-    for (const a of roster.slice(DEFAULT_POOL_COUNT)) lastOut[a.id] = now;
-    g.__strokeState = { roster, pool, strokes: [], lastOut };
+    for (const agent of roster) if (!present.has(agent.id)) lastOut[agent.id] = now;
+    g.__strokeState = { roster, pool, strokes: published.strokes, lastOut };
   }
   return g.__strokeState;
 }
@@ -68,6 +72,25 @@ export function agentCapacity(): number {
 export function getAgent(id: string): AgentProfile | undefined {
   const s = state();
   return s.pool.find((a) => a.id === id) ?? s.roster.find((a) => a.id === id);
+}
+
+/** Add known catalog participants to the pool without removing existing agents. */
+export function ensureCatalogAgents(ids: readonly string[]): AgentProfile[] {
+  const s = state();
+  const selected = [...new Set(ids)].map((id) => {
+    const agent = s.pool.find((candidate) => candidate.id === id) ?? s.roster.find((candidate) => candidate.id === id);
+    if (!agent) throw new Error(`Unknown catalog agent: ${id}`);
+    return agent;
+  });
+  const now = Date.now();
+  return selected.map((agent) => {
+    const present = s.pool.find((candidate) => candidate.id === agent.id);
+    if (present) return present;
+    const joined = { ...agent, joined_at: now };
+    s.pool.push(joined);
+    delete s.lastOut[agent.id];
+    return joined;
+  });
 }
 
 /**
@@ -186,5 +209,6 @@ export function clearStrokes(): number {
   const s = state().strokes;
   const n = s.length;
   s.length = 0;
+  clearSkyBatches();
   return n;
 }

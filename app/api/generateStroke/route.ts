@@ -13,6 +13,7 @@ import { NextResponse } from "next/server";
 import { listAgents, listStrokes, getAgent, addStroke } from "@/lib/store";
 import { generateStroke } from "@/lib/strokegen";
 import { hashStr } from "@/simulation/rng";
+import { canvasRevision } from "@/lib/skyBatchStore";
 
 export const runtime = "nodejs"; // OpenAI SDK needs the Node runtime
 export const dynamic = "force-dynamic";
@@ -30,6 +31,9 @@ export async function POST(req: Request) {
   if (!from || !to) {
     return NextResponse.json({ error: "both `from` and `to` concepts are required" }, { status: 400 });
   }
+  const revision = canvasRevision();
+  const clearedResponse = () => NextResponse.json({ code: "canvas_cleared", error: "The canvas was cleared. This earlier generation was not saved.", canvasRevision: canvasRevision() }, { status: 409 });
+  if (body.canvasRevision !== undefined && body.canvasRevision !== revision) return clearedResponse();
 
   const agents = listAgents();
   if (agents.length === 0) return NextResponse.json({ error: "no agents available" }, { status: 500 });
@@ -51,6 +55,7 @@ export async function POST(req: Request) {
   const existing = listStrokes();
   const previous = existing[existing.length - 1];
   const stroke = await generateStroke(agent, from, to, timestamp, previous);
+  if (canvasRevision() !== revision) return clearedResponse();
   addStroke(stroke);
-  return NextResponse.json({ stroke });
+  return NextResponse.json({ stroke, canvasRevision: revision });
 }
