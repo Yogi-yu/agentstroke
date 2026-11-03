@@ -12,7 +12,7 @@
     "test": "node --test tests/*.test.cjs"
   },
   "dependencies": {
-    "next": "^16.2.9",
+    "next": "^16.4.1",
     "openai": "^6.45.0",
     "p5.brush": "^2.2.2",
     "pg": "^8.23.1",
