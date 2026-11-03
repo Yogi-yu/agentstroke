@@ -16,7 +16,7 @@ model** wrappers and rendered on a WebGL canvas.
 
 The system is split into three independent layers:
 
-1. **Stroke generation** — `concept A → semantic transform → concept B → stroke`.
+1. **Stroke generation** — `agent-selected origin → free conceptual wandering → agent-selected ending → stroke`.
    The only generation pipeline. No tasks, no workload, no job simulation.
 2. **Agent identity** — agents are recognizable cognitive personalities
    (`AgentProfile`) bound to a real model. They author strokes in their own style
@@ -28,8 +28,8 @@ The system is split into three independent layers:
 - **Next.js 16** (App Router) + **React 19** + **TypeScript**
 - **WebGL2 instanced renderer** — every stroke segment is one GPU instance drawn
   in a single `drawArraysInstanced` call; capsule SDF, additive glow, feedback trails.
-- **OpenRouter** — real model semantic transforms + agent chat (graceful synthetic fallback).
-- **In-memory server store** — strokes persist across requests + refresh.
+- **OpenRouter** — real model-authored semantic artwork + agent chat. Failed stroke requests never become synthetic artwork.
+- **Durable database storage** — PostgreSQL in production, SQLite for local development. Artworks survive process restarts and deploys.
 
 ## Agents (economic production units)
 
@@ -68,35 +68,102 @@ npm run dev      # http://localhost:3000
 - `/studio` — Experiment 001 · Agent Snapshot
 - `/agent/[id]` — persistent agent identity and isolated creation environment
 - `/stroke/[id]` — stroke provenance and causal inspection
+- `/archive` — saved artworks, including those removed from the current canvas
 
 ## Published canvas and hosting
 
-`data/published-canvas.json` is the reviewed public canvas captured on October 15,
-2026: 23 available agent profiles, the 10 existing strokes, and their completed
-Sky batch. It preserves the original IDs, authors, semantic points, timestamps,
-seeds, visual signatures, and any saved edit transforms. It contains no provider
-credentials, chat history, or private environment configuration. The default
+`data/published-canvas.json` starts with 23 available agent profiles and exactly
+one labelled **wu → you** example. Only that example has fixed endpoints; its
+intermediate route and number of steps are authored by the real model. The ten
+previous artworks and their completed Sky remain byte-for-byte preserved in
+`data/archive/published-canvas-2026-10-15.json`, but are not loaded into the default
+canvas. Neither file contains provider credentials or chat history. The default
 animated trail retention remains 20%.
 
-On a **new server process**, `lib/publishedCanvas.ts` creates fresh deep copies for
-the server stores. The Studio canvas initially shows this published artwork;
-the Sky API also retains the completed batch for request recovery. A fresh visit
-to `/sky` still starts with its generation controls and does not automatically
-import the previous batch. Existing in-process state is never overwritten, and
-clearing the canvas does not reload the snapshot on refresh or hot reload.
+All ordinary and Sky generation is **autonomous**. The agent chooses its first
+concept, every intermediate concept, its final concept, and when to stop. The
+server validates complete JSON containing 2–64 steps (a resource-safety bound,
+not a target count). Every anchor must be one English word: 1–48 letters with
+no spaces, punctuation, digits or hyphens. Phrases trigger a bounded model
+repair; the server never splits or concatenates words to fake a valid node.
+It does not resample the sequence, add detours, normalize
+the endpoint words or force different semantic depths. Repeated concepts stay
+in their original order. The model's entropy and confidence values are preserved.
+These are publicly authored conceptual artworks, not access to hidden reasoning.
 
-This is a **release seed, not durable runtime storage**. New generations, edits,
-deletions, and attracted agents live only in that Node process; restarting or
-redeploying restores the bundled release snapshot. Run a single long-lived Node
-instance (`npm run build` then `npm start`) for a coherent live canvas. Multiple
-instances or serverless route workers do not share these in-memory globals;
-durable production or serverless hosting requires a shared database/job store
-before mutable generation can be relied on across workers or cold starts.
+Length follows the actual agent-authored anchor count using an increasing
+contrast curve. Counts 2 / 4 / 6 / 8 / 12 / 16 / 24 / 64 target respectively
+0.014 / 0.03 / 0.07 / 0.18 / 0.62 / 0.90 / 1.02 / 1.12 square-canvas units,
+linearly interpolated before boundary fitting. This makes a 16-word journey
+18 times the target distance of a 5-word journey, without padding or cutting
+either route. The short/medium/long labels are descriptive, not generation
+quotas. Shared Sky uses a common scale; Studio's gentle square-root readability
+gain retains contrast instead of enlarging compact marks toward one size.
+Isolated playback deliberately zooms in for inspection. Pre-autonomy archived
+artwork keeps its legacy length calculation; old phrase-based paths are not
+silently rewritten and remain labelled historical concept format.
+
+### Calligraphy and the material mix
+
+`brush_treatment` is a persisted presentation choice, not an invented agent
+attribute. Four slots in each ten-stroke Sky batch use a **calligraphy brush**;
+the remaining six retain the original intensity-selected hard, soft, watercolor
+or texture material. Individual creations use balanced five-slot groups with
+two calligraphy slots. Allocation is stable across reloads, filtering, retries,
+the shared canvas and isolated playback. Historical untagged works retain their
+original material until an explicit migration assigns this metadata.
+
+The calligraphy renderer sweeps a matte, asymmetric loaded belly, a pointed
+lift-off and coherent bristle bundles with real unpainted longitudinal channels
+(dry-brush / flying-white texture). It uses no scattered dots, brush stamps,
+extra branches, bright bevel or watercolor halo. A fine continuous pigment
+spine preserves the single-stroke route. Pressure controls the press/lift
+silhouette; entropy and confidence shape dryness; intensity controls pigment
+loading. Body width remains capped at 12 CSS pixels, with tighter limits on
+compact marks. Colors, authored words, movement, length and playback timing
+are unchanged. Material texture follows travelled distance deterministically,
+so seeking to the same time produces the same frame.
+
+### Durable storage and canvas ownership
+
+Artworks, canvas visibility and transforms, available agents, and Sky batches
+are saved in a database. Production uses `DATABASE_URL` for PostgreSQL. Render
+fails closed if this variable is missing or storage is unavailable: it does not
+silently fall back to an empty process-local canvas. Local development defaults
+to `.noema/noema.sqlite`; `NOEMA_SQLITE_PATH` overrides that path. SQLite requires
+Node.js 22.13 or newer and must live on persistent local storage. Do not deploy
+that file to Render's ephemeral filesystem. Database credentials and local
+database files must never be committed.
+
+The bundled `wu → you` example initializes a new visitor's visible canvas once.
+Historical bundled artwork is imported into the Archive, not forced onto every
+canvas. An existing visitor's saved canvas is not reseeded on refresh, process
+restart, or deployment. Each new Sky asks for ten independent agent-authored
+strokes, displaying and saving completed results one by one.
+
+There is **no artwork TTL, scheduled clearing, or maximum-history eviction**.
+“Remove from canvas” and “Clear canvas” change only the current visitor's visible
+membership (including its active Sky view). They do not delete artwork records.
+Use `/archive` to browse saved originals and restore them. Removing an agent
+from the available pool never deletes that agent's artwork or provenance.
+Failures to save or remove something are surfaced in the UI; failed edits roll
+back to the last confirmed transform instead of claiming success.
+
+An opaque, HttpOnly browser cookie identifies a visitor. Server-side ownership
+checks isolate each visitor's canvas, agents, generations and archive; bundled
+public artworks can be viewed and restored by any visitor. This is anonymous
+browser identity, **not account authentication or cross-device synchronization**.
+Another browser receives a separate canvas. Clearing or losing the cookie can
+lose access to that visitor's private collection, but does not delete its stored
+artworks. Cookie expiration is not a database retention policy. Cross-device
+recovery requires a future account-linking system. Keep database backups as an
+additional safeguard; application retention is not a substitute for backups.
 
 Configure `OPENROUTER_API_KEY` through the hosting provider's secret environment
 settings, never in Git. Existing artwork is viewable without it; model-backed
 generation and chat require the configured provider. The snapshot does not
-replace or migrate any separately deployed database.
+replace another application's tables. Use a dedicated logical database for
+Noema when sharing an existing PostgreSQL instance.
 
 ## UI
 
@@ -108,7 +175,7 @@ replace or migrate any separately deployed database.
 - **Edit Mode:** a deterministic manipulation layer (`EditModeState`). While active
   the focused stroke is draggable / rotatable (handle, or R / Shift+R), and stroke
   switching, agent switching, and generation are locked out. ESC exits.
-- **Right — Section A · Stroke Generator:** concept A, concept B, generate. Plus clear.
+- **Stroke creation:** choose an agent and ask it to create. No endpoint or length controls are supplied by the website.
 - **Right — Section B · Agent List:** each card shows economic function, category,
   real-world mapping, and a revenue-impact label. Click → agent detail page.
 - **Cinematic mode:** hides all panels + headers, leaving only the canvas and a
@@ -136,10 +203,20 @@ UIState { cinematic_mode: boolean; selected_agent: string | null; selected_strok
 | Method | Route                  | Description                                        |
 | ------ | ---------------------- | -------------------------------------------------- |
 | GET    | `/api/agents`          | Agent identity roster                              |
-| POST   | `/api/generateStroke`  | `{ from, to, agent_id? }` → `{ stroke }` (persisted) |
-| GET    | `/api/strokes`         | All persisted strokes (reload on refresh)          |
-| DELETE | `/api/strokes`         | Clear all strokes (canvas reset)                   |
+| POST   | `/api/generateStroke`  | `{ agent_id?, mode?: "autonomous", canvasRevision? }` → `{ stroke }` |
+| GET    | `/api/strokes`         | Current visitor's visible strokes                 |
+| DELETE | `/api/strokes`         | Hide visible strokes; retain every archived original |
+| DELETE | `/api/strokes?id=…`    | Hide one stroke from the current visitor's canvas  |
+| GET    | `/api/archive?offset=0&limit=30` | Paginated own and public saved artworks      |
+| POST   | `/api/archive`         | `{ id }` → restore an original to this visitor's canvas |
 | POST   | `/api/agentChat`       | `{ agent_id, message, history? }` → identity reply |
+
+Legacy `from`/`to` request fields cannot constrain autonomous generation. Only
+explicit `mode: "example"` uses `wu → you`; it reuses the existing example and
+deduplicates concurrent requests. Sky always uses autonomous mode, including
+retries. Provider errors are safe, visible failures; no fabricated fallback is
+saved. Bounded retries, cancellation, canvas-reset guards and batch idempotency
+remain in effect.
 
 ## Architecture
 

@@ -19,6 +19,7 @@ import CanvasView from "@/components/CanvasView";
 import AgentCreationForm from "@/components/AgentCreationForm";
 import AgentChatPanel from "@/components/AgentChatPanel";
 import StrokePlayerPanel from "@/components/StrokePlayerPanel";
+import StorageNotice from "@/components/StorageNotice";
 import type { Agent } from "@/lib/types";
 import { agentRenderStyle, categoryLabel } from "@/lib/agents";
 import { modelSpec } from "@/lib/openrouter/models";
@@ -28,7 +29,7 @@ const noop = () => {};
 
 export default function AgentDetailMobile({ id }: { id: string }) {
   const router = useRouter();
-  const { agents, strokes, ready, generating } = useApp();
+  const { agents, strokes, ready, generating, generationError } = useApp();
   const agent = agents.find((a) => a.id === id) ?? null;
   const agentStrokes = useMemo(() => strokes.filter((s) => s.agent_id === id), [strokes, id]);
   const renderAgents = useMemo<Agent[]>(() => agent ? [{ id: agent.id, style: agentRenderStyle(agent.category) }] : [], [agent]);
@@ -37,6 +38,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [confirmDeleteAgent, setConfirmDeleteAgent] = useState(false);
+  const [removingAgent, setRemovingAgent] = useState(false);
   const [strokesOpen, setStrokesOpen] = useState(false);
   const [previewStrokeId, setPreviewStrokeId] = useState<string | null>(null);
   const previewStroke = agentStrokes.find((stroke) => stroke.id === previewStrokeId) ?? null;
@@ -62,14 +64,15 @@ export default function AgentDetailMobile({ id }: { id: string }) {
     setChatOpen(false);
   }, []);
 
-  const onCreate = (from: string, to: string) => {
+  const onCreate = async () => {
     if (!agent) return;
-    void appStore.generate(from, to, agent.id);
-    setSheetOpen(false);
+    await appStore.generateAutonomous(agent.id);
+    if (!appStore.getSnapshot().generationError) setSheetOpen(false);
   };
 
   return (
     <div className="adm">
+      <StorageNotice />
       {/* SECTION 3 — CANVAS: full-screen primary interaction layer */}
       <div className="adm-canvas">
         <CanvasView
@@ -121,7 +124,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
           <div className="adm-info-row"><span>revenue impact</span><p>{agent.revenue_impact}</p></div>
           <div className="adm-info-row"><span>model</span><p>{modelSpec(agent.model).label} · {agent.model}</p></div>
           <div className="adm-info-row"><span>strokes</span><p>{agentStrokes.length}</p></div>
-          <button className="btn danger adm-del" onClick={() => setConfirmDeleteAgent(true)}>🗑 Delete agent</button>
+          <button className="btn danger adm-del" onClick={() => { appStore.dismissStorageError(); setConfirmDeleteAgent(true); }}>Remove available agent</button>
         </div>
       )}
 
@@ -155,7 +158,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
         </button>
       </div>
 
-      {/* Create sheet — A → B in agent context */}
+      {/* Create sheet — no website-assigned words or route. */}
       {sheetOpen && agent && (
         <div className="adm-sheet-overlay" onClick={() => setSheetOpen(false)}>
           <div className="adm-sheet" onClick={(e) => e.stopPropagation()}>
@@ -163,6 +166,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
             <AgentCreationForm
               agentName={agent.name}
               generating={generating}
+              error={generationError}
               onCreate={onCreate}
               onExit={() => setSheetOpen(false)}
             />
@@ -187,19 +191,25 @@ export default function AgentDetailMobile({ id }: { id: string }) {
 
       {/* Delete-agent confirmation */}
       {confirmDeleteAgent && (
-        <div className="modal-overlay" onClick={() => setConfirmDeleteAgent(false)}>
+        <div className="modal-overlay" onClick={() => { if (!removingAgent) setConfirmDeleteAgent(false); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Delete agent?</h3>
+            <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
-              This removes <b>{agent?.name ?? id}</b> and all of its strokes. This cannot be undone.
+              This removes <b>{agent?.name ?? id}</b> from your available pool only. All artworks remain on your canvas and in the Archive. You can attract this agent again later.
             </p>
+            <StorageNotice />
             <div className="modal-actions">
-              <button className="mini" onClick={() => setConfirmDeleteAgent(false)}>Cancel</button>
+              <button className="mini" disabled={removingAgent} onClick={() => setConfirmDeleteAgent(false)}>Cancel</button>
               <button
                 className="mini reject danger"
-                onClick={() => { void appStore.deleteAgent(id); setConfirmDeleteAgent(false); router.push("/"); }}
+                disabled={removingAgent}
+                onClick={async () => {
+                  setRemovingAgent(true);
+                  try { if (await appStore.deleteAgent(id)) { setConfirmDeleteAgent(false); router.push("/studio"); } }
+                  finally { setRemovingAgent(false); }
+                }}
               >
-                Delete
+                {removingAgent ? "Removing…" : "Remove agent"}
               </button>
             </div>
           </div>

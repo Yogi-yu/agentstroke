@@ -4,6 +4,7 @@ import { memo, useCallback, useEffect, useId, useMemo, useState, type ReactNode 
 import CanvasView from "@/components/CanvasView";
 import { getStrokePlayback } from "@/engine/strokePlayback";
 import { MOTION_PATTERN_BY_GEOMETRY } from "@/engine/motionPattern";
+import { resolveVisualSignature } from "@/engine/visualSignature";
 import { agentRenderStyle, categoryLabel } from "@/lib/agents";
 import type { Agent, AgentProfile, TransitionPath } from "@/lib/types";
 
@@ -35,6 +36,7 @@ function StrokePlayerContent({ stroke, agent, onClose, actions, strokeOptions, s
   const paths = useMemo(() => [stroke], [stroke]);
   const agents = useMemo<Agent[]>(() => [{ id: stroke.agent_id, style: agentRenderStyle(agent?.category ?? "coding") }], [stroke.agent_id, agent?.category]);
   const timing = useMemo(() => getStrokePlayback(stroke), [stroke]);
+  const material = useMemo(() => resolveVisualSignature(stroke).brush_style, [stroke]);
 
   useEffect(() => {
     setPlaying(!window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -72,9 +74,12 @@ function StrokePlayerContent({ stroke, agent, onClose, actions, strokeOptions, s
           )}
         </div>
         <div className="sd-h-meta">
+          <span>{stroke.generation_mode === "example" ? "Fixed-endpoint example · agent-authored route" : stroke.generation_mode === "autonomous" ? "Agent-chosen endpoints and route" : "Archived generation"}</span>
+          <span>{stroke.anchor_format === "single_word" ? "One word per step" : "Historical concept format"}</span>
           <span>agent <b>{agent?.name ?? stroke.agent_id}</b></span>
           {agent && <span>{categoryLabel(agent.category)}</span>}
           <span>motion <b>{MOTION_PATTERN_BY_GEOMETRY[stroke.geometry_mode ?? "linear"]}</b></span>
+          <span>material <b>{material === "calligraphy" ? "Calligraphy brush" : material}</b></span>
           <span>{new Date(stroke.timestamp ?? stroke.created_at).toLocaleString("en-US", { hour12: false })}</span>
         </div>
         <code className="sd-h-id">{stroke.id}</code>

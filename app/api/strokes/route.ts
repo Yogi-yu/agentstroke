@@ -1,68 +1,44 @@
-// ============================================================================
-// /api/strokes — server-persisted A→B strokes (Layer 1 + 3).
-// ----------------------------------------------------------------------------
-//   GET    → every stored stroke (loaded on page refresh)
-//   PATCH  → { id, transform } persist one stroke's edit-mode transform
-//   DELETE → ?id=<id> remove ONE stroke globally; no id → clear all (reset)
-//
-// Persistence is the system's backbone: this is a "persistent cognitive stroke
-// database", so edits and deletions are written here, not just in the UI.
-// ============================================================================
-
 import { NextResponse } from "next/server";
-import {
-  listStrokes,
-  clearStrokes,
-  removeStroke,
-  updateStrokeTransform,
-} from "@/lib/store";
+import { readCanvas, clearStrokes, removeStroke, updateStrokeTransform, canvasRevision } from "@/lib/store";
+import { withVisitor } from "@/lib/visitor";
 import type { StrokeTransform } from "@/lib/types";
-import { canvasRevision } from "@/lib/skyBatchStore";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
-  return NextResponse.json({ strokes: listStrokes(), canvasRevision: canvasRevision() }, { headers: { "Cache-Control": "no-store" } });
+export async function GET(request: Request) {
+  return withVisitor(request, async owner => NextResponse.json(await readCanvas(owner), { headers: { "Cache-Control": "no-store" } }));
 }
 
-function isTransform(v: unknown): v is StrokeTransform {
-  if (!v || typeof v !== "object") return false;
-  const t = v as Record<string, unknown>;
+function isTransform(value: unknown): value is StrokeTransform {
+  if (!value || typeof value !== "object") return false;
+  const t = value as Record<string, unknown>;
   const tr = t.translation as Record<string, unknown> | undefined;
-  return (
-    !!tr &&
-    typeof tr.x === "number" &&
-    typeof tr.y === "number" &&
-    typeof t.rotation === "number" &&
-    typeof t.scale === "number"
-  );
+  return !!tr && [tr.x, tr.y, t.rotation, t.scale].every(v => typeof v === "number" && Number.isFinite(v))
+    && Math.abs(tr.x as number) <= 100 && Math.abs(tr.y as number) <= 100
+    && Math.abs(t.rotation as number) <= 100000 && (t.scale as number) > 0 && (t.scale as number) <= 100;
 }
 
-export async function PATCH(req: Request) {
-  let body: Record<string, unknown> = {};
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
-  }
-  const id = typeof body.id === "string" ? body.id : "";
-  if (!id) return NextResponse.json({ error: "`id` is required" }, { status: 400 });
-  if (!isTransform(body.transform)) {
-    return NextResponse.json({ error: "`transform` is malformed" }, { status: 400 });
-  }
-  const stroke = updateStrokeTransform(id, body.transform);
-  if (!stroke) return NextResponse.json({ error: `unknown stroke: ${id}` }, { status: 404 });
-  return NextResponse.json({ stroke });
+export async function PATCH(request: Request) {
+  return withVisitor(request, async owner => {
+    let body: Record<string, unknown>;
+    try { body = await request.json(); } catch { return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 }); }
+    if (!body || typeof body.id !== "string" || !body.id || !isTransform(body.transform)) return NextResponse.json({ error: "A stroke ID and finite transform are required." }, { status: 400 });
+    const stroke = await updateStrokeTransform(owner, body.id, body.transform);
+    if (!stroke) return NextResponse.json({ error: "Stroke not found on your canvas." }, { status: 404 });
+    return NextResponse.json({ stroke });
+  });
 }
 
-export async function DELETE(req: Request) {
-  const id = new URL(req.url).searchParams.get("id");
-  if (id) {
-    const removed = removeStroke(id);
-    if (!removed) return NextResponse.json({ error: `unknown stroke: ${id}` }, { status: 404 });
-    return NextResponse.json({ deleted: true, id });
-  }
-  const removed = clearStrokes();
-  return NextResponse.json({ cleared: true, removed, canvasRevision: canvasRevision() });
+/** Removal only changes this visitor's canvas membership; artwork is retained. */
+export async function DELETE(request: Request) {
+  return withVisitor(request, async owner => {
+    const id = new URL(request.url).searchParams.get("id");
+    if (id) {
+      const removed = await removeStroke(owner, id);
+      return removed ? NextResponse.json({ deleted: true, id, archived: true }) : NextResponse.json({ error: "Stroke not found on your canvas." }, { status: 404 });
+    }
+    const removed = await clearStrokes(owner);
+    return NextResponse.json({ cleared: true, removed, archived: true, canvasRevision: await canvasRevision(owner) });
+  });
 }

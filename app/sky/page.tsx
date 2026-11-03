@@ -3,12 +3,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import CanvasView from "@/components/CanvasView";
+import CanvasPlaybackControls from "@/components/CanvasPlaybackControls";
 import StrokePlayerPanel from "@/components/StrokePlayerPanel";
 import { agentRenderStyle } from "@/lib/agents";
-import { SKY_BATCH_SIZE, type SkyBatch } from "@/lib/skyBatch";
+import { skyBatchSize, skyTargetCount, type SkyBatch, type SkyMode } from "@/lib/skyBatch";
 import { acceptSkySnapshot, readSkyProgress, skyDisplayLayout, skyPresentation } from "@/lib/skyPresentation";
 import { canvasRevisionOf, publishCanvasReset, subscribeCanvasReset } from "@/lib/canvasReset";
 import type { Agent } from "@/lib/types";
+import type { CanvasDisplayMode } from "@/engine/canvasPresentation";
+import { ANIMATED_TRAIL_RETENTION } from "@/engine/meteorTrail";
+import { DEFAULT_SPHERE_CONTROLS, type SphereViewControls } from "@/engine/playbackControls";
 
 const noop = () => {};
 const statusLabel = { queued: "Waiting", running: "Generating", succeeded: "Ready", failed: "Failed" };
@@ -27,8 +31,6 @@ function rememberRequest(requestId: string | null) {
 export default function SkyPage() {
   const [job, setJob] = useState<SkyBatch | null>(null);
   const [configured, setConfigured] = useState<boolean | null>(null);
-  const [from, setFrom] = useState("chaos");
-  const [to, setTo] = useState("order");
   const [error, setError] = useState("");
   const [requesting, setRequesting] = useState(false);
   const [needsRecovery, setNeedsRecovery] = useState(false);
@@ -36,6 +38,11 @@ export default function SkyPage() {
   const [controlsVisible, setControlsVisible] = useState(true);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [skyReplayKey, setSkyReplayKey] = useState(0);
+  const [displayMode, setDisplayMode] = useState<CanvasDisplayMode>("animated");
+  const [skyMode, setSkyMode] = useState<SkyMode>("standard");
+  const [motionSpeed, setMotionSpeed] = useState(1);
+  const [trailRetention, setTrailRetention] = useState(ANIMATED_TRAIL_RETENTION);
+  const [sphereControls, setSphereControls] = useState<SphereViewControls>({ ...DEFAULT_SPHERE_CONTROLS });
   const [canvasRevision, setCanvasRevision] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now);
   const busyRef = useRef(false);
@@ -47,6 +54,7 @@ export default function SkyPage() {
   const jobRef = useRef<SkyBatch | null>(null);
   const lifecycleRef = useRef(0);
   const requestStartedAtRef = useRef(0);
+  const presentedCanvasRef = useRef<string | null>(null);
 
   const resetSky = useCallback((revision: number | null) => {
     lifecycleRef.current++;
@@ -62,6 +70,7 @@ export default function SkyPage() {
       setCanvasRevision(revision);
     }
     jobRef.current = null;
+    presentedCanvasRef.current = null;
     setJob(null);
     setSelectedId(null);
     setRequesting(false);
@@ -93,6 +102,17 @@ export default function SkyPage() {
     const accepted = acceptSkySnapshot(jobRef.current, incoming, expected);
     jobRef.current = accepted;
     setJob(accepted);
+    if (accepted) {
+      const identity = accepted.canvasId ?? accepted.id;
+      // Restore the saved generation mode once, not on every polling frame.
+      // A user may then inspect the same batch in Static or Animated freely.
+      if (presentedCanvasRef.current !== identity) {
+        presentedCanvasRef.current = identity;
+        const restoredMode: SkyMode = skyTargetCount(accepted) === 20 ? "sphere" : "standard";
+        setSkyMode(restoredMode);
+        setDisplayMode(restoredMode === "sphere" ? "sphere" : "animated");
+      }
+    }
     setNeedsRecovery(false);
     if (accepted && accepted.status !== "running") {
       // A polling response can finish the job while the transport remains
@@ -214,7 +234,7 @@ export default function SkyPage() {
   }, [requesting, job?.status]);
 
   const generate = useCallback(async (retryFailed = false) => {
-    if (busyRef.current || job?.status === "running" || canvasRevisionRef.current === null || (!retryFailed && (!from.trim() || !to.trim()))) return;
+    if (busyRef.current || needsRecovery || job?.status === "running" || canvasRevisionRef.current === null) return;
     if (retryFailed && !job?.entries.some((entry) => entry.status === "failed")) return;
     busyRef.current = true;
     streamActiveRef.current = true;
@@ -223,10 +243,15 @@ export default function SkyPage() {
     const requestId = crypto.randomUUID();
     const epoch = lifecycleRef.current;
     const revision = canvasRevisionRef.current;
+    const requestedMode: SkyMode = retryFailed && job ? (skyTargetCount(job) === 20 ? "sphere" : "standard") : skyMode;
+    setSkyMode(requestedMode);
     expectedRequestRef.current = requestId;
     rememberRequest(requestId);
     // A retry preserves every successful stroke and its canvas animation state.
-    if (!retryFailed) { jobRef.current = null; setJob(null); }
+    if (!retryFailed) {
+      jobRef.current = null; setJob(null);
+      setDisplayMode(requestedMode === "sphere" ? "sphere" : "animated");
+    }
     setRequesting(true);
     setNeedsRecovery(false);
     setControlsVisible(true);
@@ -240,7 +265,7 @@ export default function SkyPage() {
       const response = await fetch("/api/skyBatch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(retryFailed ? { requestId, retryOf: job!.requestId, canvasRevision: revision } : { requestId, from: from.trim(), to: to.trim(), canvasRevision: revision }),
+        body: JSON.stringify({ requestId, mode: "autonomous", skyMode: requestedMode, canvasRevision: revision, ...(retryFailed ? { retryOf: job!.requestId } : {}) }),
         signal: controller.signal,
       });
       if (!isCurrent()) return;
@@ -290,11 +315,18 @@ export default function SkyPage() {
         setRequesting(false);
       }
     }
-  }, [job, from, to, loadSnapshot, acceptJob, resetSky]);
+  }, [job, skyMode, needsRecovery, loadSnapshot, acceptJob, resetSky]);
 
   const entries = job?.entries ?? [];
-  const presentation = useMemo(() => skyPresentation(job, requesting, skyReplayKey), [job, requesting, skyReplayKey]);
-  const { paths, succeeded, failed, completed, running } = presentation;
+  const presentation = useMemo(() => skyPresentation(job, requesting, skyReplayKey, skyMode), [job, requesting, skyReplayKey, skyMode]);
+  const { paths, succeeded, failed, completed, running, targetCount } = presentation;
+  const nextCount = skyBatchSize(skyMode);
+  const generationLocked = running || requesting || needsRecovery;
+  const chooseSkyMode = (mode: SkyMode) => {
+    if (generationLocked) return;
+    setSkyMode(mode);
+    setDisplayMode(mode === "sphere" ? "sphere" : "animated");
+  };
   const agents = useMemo<Agent[]>(() => [...new Map(job?.entries.map(({ agent }) => [agent.id, { id: agent.id, style: agentRenderStyle(agent.category) }] as const) ?? []).values()], [job]);
   const strokeOptionLabels = useMemo(() => new Map(
     job?.entries.flatMap((entry, index) => entry.stroke
@@ -302,7 +334,7 @@ export default function SkyPage() {
       : []) ?? [],
   ), [job]);
   const layoutKey = entries.map((entry) => entry.stroke?.id ?? "").join("|");
-  const displayLayout = useMemo(() => skyDisplayLayout(layoutKey.split("|"), portrait), [layoutKey, portrait]);
+  const displayLayout = useMemo(() => skyDisplayLayout(layoutKey.split("|"), portrait, targetCount), [layoutKey, portrait, targetCount]);
   const selected = entries.find((entry) => entry.stroke?.id === selectedId);
   const active = presentation.activeEntry;
   const elapsedStart = active?.startedAt ?? job?.createdAt ?? requestStartedAtRef.current;
@@ -310,54 +342,73 @@ export default function SkyPage() {
   const elapsed = elapsedSeconds < 60 ? `${elapsedSeconds}s` : `${Math.floor(elapsedSeconds / 60)}m ${elapsedSeconds % 60}s`;
 
   return (
-    <main className="sky-page" data-sky-state={running ? "generating" : presentation.showCanvas ? "ready" : "empty"}>
+    <main className="sky-page" data-sky-mode={skyMode} data-sky-state={running ? "generating" : presentation.showCanvas ? "ready" : "empty"}>
       <header className="sky-nav">
-        <Link href="/studio" className="sky-back" aria-label="Back to Agent Snapshot">← Snapshot</Link>
+        <nav className="sky-primary-links" aria-label="Platform navigation">
+          <Link href="/studio" className="sky-back" aria-label="Back to Agent Snapshot">← Snapshot</Link>
+          <Link href="/deck" className="sky-deck-link">Deck</Link>
+        </nav>
         <div className="sky-nav-actions">
-          <button type="button" disabled={paths.length === 0} onClick={() => setSkyReplayKey((key) => key + 1)}>Replay sky</button>
+          <button type="button" disabled={paths.length === 0} onClick={() => {
+            setSphereControls(controls => ({ ...controls, playing: true }));
+            setSkyReplayKey((key) => key + 1);
+          }}>Replay sky</button>
           <button type="button" onClick={() => setControlsVisible((value) => !value)}>{controlsVisible ? "Hide controls" : "Show controls"}</button>
         </div>
       </header>
       <div className="sky-content">
         {controlsVisible && <section className="sky-console" aria-label="Star field generation">
-          <div className="sky-heading"><h1>Sky</h1><p>Ten strokes. One at a time.</p></div>
+          <div className="sky-heading"><h1>Sky</h1><p>Independent journeys. One shared sky.</p></div>
+          <div className="sky-generation-modes" role="group" aria-label="Sky generation mode">
+            <button type="button" disabled={generationLocked} aria-pressed={skyMode === "standard"} onClick={() => chooseSkyMode("standard")}>
+              <strong>Standard sky</strong><span>10 strokes · Open canvas</span>
+            </button>
+            <button type="button" disabled={generationLocked} aria-pressed={skyMode === "sphere"} onClick={() => chooseSkyMode("sphere")}>
+              <strong>Spherical sky</strong><span>20 strokes · One rotating sphere</span>
+            </button>
+          </div>
           <form className="sky-generate" onSubmit={(event) => { event.preventDefault(); void generate(); }}>
-            <label><span>From</span><input value={from} onChange={(event) => setFrom(event.target.value)} maxLength={100} disabled={running} aria-label="From concept" /></label>
-            <span className="sky-arrow" aria-hidden="true">→</span>
-            <label><span>To</span><input value={to} onChange={(event) => setTo(event.target.value)} maxLength={100} disabled={running} aria-label="To concept" /></label>
-            <button type="submit" disabled={running || requesting || !configured || canvasRevision === null || !from.trim() || !to.trim()}>{running ? `Generating ${completed}/${SKY_BATCH_SIZE}` : "Generate 10 strokes"}</button>
+            <p className="sky-autonomy">Each agent chooses its own starting word, ending word, and wandering steps. One English word per step. Brief and extended journeys create distinctly different stroke lengths.</p>
+            <button type="submit" disabled={generationLocked || !configured || canvasRevision === null}>{running ? `Generating ${completed}/${targetCount}` : `Generate ${nextCount} strokes`}</button>
           </form>
-          {!job && !running && <p className="sky-note">Create ten strokes using your available agents. Each stroke appears as soon as it is ready. No new agents are added.</p>}
+          {!job && !running && <p className="sky-note">Create {nextCount} strokes using your available agents in one request. Each stroke appears as soon as it is ready. No new agents are added.</p>}
         </section>}
         {configured === false && <p className="sky-error">Configure OPENROUTER_API_KEY to generate real agent strokes.</p>}
         {error && <p className="sky-error" role="alert">{error}</p>}
         {needsRecovery && <p className="sky-note" role="status">Reconnecting to the existing request. No generation will be repeated.</p>}
         {presentation.showProgress && <section className={`sky-progress${running ? " is-running" : ""}`} aria-label="Generation progress" aria-live="polite">
-          <div className="sky-progress-heading"><h2>{presentation.headline}</h2><span>{completed * 10}%</span></div>
-          <progress value={completed} max={SKY_BATCH_SIZE} aria-label="Stroke generation progress" aria-valuetext={`${completed}/10 completed, ${succeeded} succeeded, ${failed} failed`} />
+          <div className="sky-progress-heading"><h2>{presentation.headline}</h2><span>{Math.round(completed / targetCount * 100)}%</span></div>
+          <progress value={completed} max={targetCount} aria-label="Stroke generation progress" aria-valuetext={`${completed}/${targetCount} completed, ${succeeded} succeeded, ${failed} failed`} />
           {running && <div className="sky-active" role="status">
             <span className="sky-active-indicator" aria-hidden="true" />
             <div className="sky-active-copy">
-              <strong>{active ? `Creating stroke ${presentation.activeIndex + 1} of ${SKY_BATCH_SIZE}` : job ? "Preparing the next stroke" : "Starting generation"}</strong>
+              <strong>{active ? `Creating stroke ${presentation.activeIndex + 1} of ${targetCount}` : job ? "Preparing the next stroke" : "Starting generation"}</strong>
               <small>{active ? `${active.agent.name} · Attempt ${active.attempts ?? 1} · ` : "Waiting for the next update · "}<span aria-live="off">{elapsed} {active?.startedAt ? "elapsed" : "batch elapsed"}</span></small>
             </div>
           </div>}
-          <p>Completed {completed}/10 · Succeeded {succeeded} · Failed {failed}{running ? " · Drawing each stroke as it arrives" : failed ? " · Showing successful results only" : " · All strokes are ready"}</p>
-          {failed > 0 && !running && <button type="button" className="sky-retry" disabled={!configured || requesting} onClick={() => { void generate(true); }}>{requesting ? "Starting retry…" : `Retry failed (${failed})`}</button>}
+          <p>Completed {completed}/{targetCount} · Succeeded {succeeded} · Failed {failed}{running ? " · Drawing each stroke as it arrives" : failed ? " · Showing successful results only" : " · All strokes are ready"}</p>
+          {failed > 0 && !running && <button type="button" className="sky-retry" disabled={!configured || generationLocked} onClick={() => { void generate(true); }}>{requesting ? "Starting retry…" : `Retry failed (${failed})`}</button>}
         </section>}
         {presentation.showCanvas ? (
           <section className="sky-artwork" aria-label="Generated sky">
-            <div className="sky-canvas">
-              <CanvasView key={presentation.canvasKey} paths={paths} agents={agents} selectedStrokeId={null} filterAgentId={null} editMode={false} onSelectStroke={setSelectedId} onTransformCommit={noop} displayLayout={displayLayout} />
+            <div className="sky-display-controls" role="group" aria-label="Sky display mode">
+              <button type="button" aria-pressed={displayMode === "animated"} onClick={() => setDisplayMode("animated")}>Animated</button>
+              <button type="button" aria-pressed={displayMode === "static"} onClick={() => setDisplayMode("static")}>Static · Final form</button>
+              <button type="button" aria-pressed={displayMode === "sphere"} onClick={() => setDisplayMode("sphere")}>Sphere</button>
             </div>
+            <div className="sky-canvas">
+              <CanvasView key={presentation.canvasKey} paths={paths} agents={agents} selectedStrokeId={null} filterAgentId={null} editMode={false} onSelectStroke={setSelectedId} onTransformCommit={noop} displayLayout={displayLayout} displayMode={displayMode} trailRetention={trailRetention} motionSpeed={motionSpeed} sphereControls={sphereControls} />
+            </div>
+            <CanvasPlaybackControls displayMode={displayMode} trailRetention={trailRetention} onTrailRetentionChange={setTrailRetention}
+              motionSpeed={motionSpeed} onMotionSpeedChange={setMotionSpeed} sphereControls={sphereControls} onSphereControlsChange={setSphereControls} />
           </section>
-        ) : <p className="sky-empty" role="status">{running ? "Waiting for the first stroke. Drawing will begin below as soon as it arrives." : job ? "This batch produced no strokes to display. Check the failure details below." : "Select Generate 10 strokes to begin. The canvas appears when the first stroke is ready."}</p>}
+        ) : <p className="sky-empty" role="status">{running ? "Waiting for the first stroke. Drawing will begin below as soon as it arrives." : job ? "This batch produced no strokes to display. Check the failure details below." : `Select Generate ${nextCount} strokes to begin. The canvas appears when the first stroke is ready.`}</p>}
         {controlsVisible && job && <details className="sky-results">
           <summary>This sky · {succeeded} strokes{failed ? ` · ${failed} failed` : ""}</summary>
           <div className="sky-result-list">
             {entries.map((entry, index) => <div className={`sky-result ${entry.status}`} key={`${job.canvasId ?? job.id}:slot-${index}`}>
               <span className="sky-result-index">{String(index + 1).padStart(2, "0")}</span>
-              <div><Link href={`/agent/${entry.agent.id}`}>{entry.agent.name}</Link><small>{entry.agent.model_type} · {entry.status === "running" && (entry.attempts ?? 1) > 1 ? `Retrying (${entry.attempts}/2)` : statusLabel[entry.status]}</small>{entry.error && <p>{entry.error}</p>}</div>
+              <div><Link href={`/agent/${entry.agent.id}`}>{entry.agent.name}</Link><small>{entry.agent.model_type} · {entry.status === "running" && (entry.attempts ?? 1) > 1 ? `Retrying (${entry.attempts}/2)` : statusLabel[entry.status]}</small>{entry.stroke && <p className="sky-result-path">{entry.stroke.from} → {entry.stroke.to} · {entry.stroke.points.length} steps{entry.stroke.brush_treatment === "calligraphy" ? " · Calligraphy brush" : ""}</p>}{entry.error && <p>{entry.error}</p>}</div>
               {entry.stroke && <button type="button" onClick={() => setSelectedId(entry.stroke!.id)}>Replay</button>}
             </div>)}
           </div>

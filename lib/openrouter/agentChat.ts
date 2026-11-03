@@ -2,7 +2,7 @@
 // Agent Chat — identity introspection interface (NOT a generic chatbot).
 // ----------------------------------------------------------------------------
 // An agent answers questions about ITSELF: its identity, cognitive style, the
-// way it generates strokes, and the A→B semantic transitions it favours. Powers
+// way it generates strokes, and the semantic journeys it authors. Powers
 // POST /api/agentChat. Falls back to a deterministic on-theme reply when
 // OpenRouter is unavailable so the panel never dies.
 // ============================================================================
@@ -21,14 +21,14 @@ export interface ChatCompletionMessage {
 
 /** Compact, identity-grounded context the agent reasons about. */
 export interface AgentChatContext {
-  recent_transitions: string[]; // e.g. "chaos → order"
+  recent_transitions: string[];
   stroke_count: number;
 }
 
-/** Summarize an agent's recent strokes into A→B transition lines. */
+/** Keep authorship distinctions visible when discussing the fixed example. */
 export function buildChatContext(strokes: TransitionPath[]): AgentChatContext {
   return {
-    recent_transitions: strokes.slice(-5).map((s) => `${s.from} → ${s.to}`),
+    recent_transitions: strokes.slice(-5).map((s) => `${s.from} → ${s.to} (${s.points.length} steps; ${s.generation_mode === "autonomous" ? "agent-chosen endpoints and route" : s.generation_mode === "example" ? "fixed example endpoints; agent-chosen route" : "historical stroke; endpoint authorship not recorded"})`),
     stroke_count: strokes.length,
   };
 }
@@ -44,8 +44,10 @@ export function buildChatMessages(
     `You are ${agent.name}, a ${agent.occupation} — an economic production unit in a simulated AI economy.`,
     "You are NOT an abstract thinker and NOT a general assistant. Answer ONLY as this agent,",
     "grounded in your ECONOMIC FUNCTION. You exist to produce real economic value. You also",
-    "generate A→B strokes whose shape reflects your economic function. Speak in the first",
-    "person, stay in character, and keep answers concise.",
+    "author semantic journeys: you choose the first word, last word, and every intermediate step, including when to stop. The website visualizes that recorded route as a stroke.",
+    "New journeys use exactly one English word at each step, never a phrase. Older recorded artworks may still contain phrases; do not claim they were generated under the new word-only rule.",
+    "The sole fixed example uses wu → you; its endpoints are supplied by the website, not freely chosen. Do not claim a fixed example or historical endpoints were autonomous choices.",
+    "Describe recorded results without inventing unrecorded private reasoning. Speak in the first person, stay in character, and keep answers concise.",
     "Respond only in English, even when the user's message or previous chat is in another language.",
     "",
     "=== YOUR ECONOMIC IDENTITY ===",
@@ -83,7 +85,7 @@ export function syntheticChatReply(agent: AgentProfile, ctx: AgentChatContext, m
     return `My task domain is ${agent.task_domain}. As a ${agent.category} agent I act like a ${agent.real_world_mapping}.`;
   }
   if (/stroke|transition|path|a to b|generate/.test(q)) {
-    return `I move from a concept A to a concept B in a way that reflects my work as a ${agent.category} agent.${recent ? ` Most recently I produced ${recent}.` : ""}`;
+    return `In autonomous creation I choose my own first word, destination, and intervening steps; the journey determines the stroke's length. The wu → you example is the one exception with fixed endpoints.${recent ? ` My most recent recorded result is ${recent}.` : ""}`;
   }
   return `I am ${agent.name}, the ${agent.occupation} — ${agent.economic_function}. Ask about my economic function, domain, or revenue impact.`;
 }

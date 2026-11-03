@@ -20,6 +20,7 @@ import {
   type ChatTurn,
 } from "@/lib/openrouter/agentChat";
 import { chatCacheKey, getCachedChat, setCachedChat } from "@/lib/openrouter/chatCache";
+import { withVisitor } from "@/lib/visitor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,9 +36,12 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 }
 
 export async function POST(req: Request) {
+  return withVisitor(req, async owner => {
   let body: Record<string, unknown> = {};
   try {
-    body = await req.json();
+    const parsed = await req.json();
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid body");
+    body = parsed;
   } catch {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
@@ -47,7 +51,7 @@ export async function POST(req: Request) {
   if (!agent_id) return NextResponse.json({ error: "agent_id is required" }, { status: 400 });
   if (!message) return NextResponse.json({ error: "message is required" }, { status: 400 });
 
-  const agent = getAgent(agent_id);
+  const agent = await getAgent(owner, agent_id);
   if (!agent) return NextResponse.json({ error: `unknown agent: ${agent_id}` }, { status: 404 });
 
   const history = Array.isArray(body.history)
@@ -61,10 +65,10 @@ export async function POST(req: Request) {
         .slice(-MAX_HISTORY)
     : [];
 
-  const ctx = buildChatContext(strokesForAgent(agent_id));
+  const ctx = buildChatContext(await strokesForAgent(owner, agent_id));
 
   // cache repeated questions per agent
-  const key = chatCacheKey(agent_id, message);
+  const key = chatCacheKey(owner, agent_id, message, JSON.stringify([ctx, history]));
   const cached = getCachedChat(key);
   if (cached) {
     return NextResponse.json({
@@ -111,4 +115,5 @@ export async function POST(req: Request) {
   const timestamp = Date.now();
   setCachedChat(key, { response, model: agent.model, timestamp, source });
   return NextResponse.json({ agent_id, response, model: agent.model, timestamp, cached: false, source });
+  });
 }

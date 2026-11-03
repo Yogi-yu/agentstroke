@@ -5,3 +5,8 @@ out
 *.log
 .env*.local
 next-env.d.ts
+.noema/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db

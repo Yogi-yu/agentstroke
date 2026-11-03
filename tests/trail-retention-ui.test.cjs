@@ -169,7 +169,7 @@ test("static and edit modes disable the slider with clear English hints without 
   try {
     app.click("Static · Final form");
     assert.equal(app.slider.props.disabled, true);
-    assert.equal(app.hint, "Animated mode only");
+    assert.equal(app.hint, "Available in Animated and Sphere modes");
     app.input("70");
     assert.equal(app.canvas.props.trailRetention, 0.45);
     app.click("Animated");
@@ -181,6 +181,36 @@ test("static and edit modes disable the slider with clear English hints without 
     app.input("20");
     assert.equal(app.canvas.props.trailRetention, 0.45);
     assert.equal(app.output, "45%");
+  } finally { app.close(); }
+});
+
+test("Sphere keeps trail retention live and switching to planar editing does not mutate artwork", () => {
+  const app = studioHarness({ saved: "0.45" });
+  try {
+    const canvas = app.canvas;
+    app.click("Sphere");
+    assert.equal(app.canvas.props.displayMode, "sphere");
+    assert.equal(app.values.get("noema.snapshot.display-mode"), "sphere");
+    assert.equal(app.slider.props.disabled, false);
+    assert.match(app.hint, /45%/);
+    app.input("72");
+    assert.equal(app.canvas.props.trailRetention, 0.72);
+    assert.equal(app.output, "72%");
+    assert.equal(app.canvas.props.paths, canvas.props.paths);
+    assert.equal(app.canvas.props.agents, canvas.props.agents);
+    app.click("Static · Final form");
+    assert.equal(app.slider.props.disabled, true);
+    app.click("Sphere");
+    assert.equal(app.slider.props.disabled, false);
+    assert.equal(app.canvas.props.trailRetention, 0.72);
+
+    app.edit();
+    assert.equal(app.canvas.props.displayMode, "animated", "Geometry editing must use the planar canvas");
+    assert.equal(app.slider.props.disabled, true);
+    app.click("Sphere");
+    assert.equal(app.canvas.props.displayMode, "animated", "A programmatic click cannot switch modes during an edit");
+    assert.equal(app.canvas.props.trailRetention, 0.72);
+    assert.deepEqual(app.calls, ["bootstrap"], "Presentation changes must not generate or persist artwork");
   } finally { app.close(); }
 });
 

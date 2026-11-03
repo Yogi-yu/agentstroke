@@ -1,4 +1,4 @@
-import type { GeometryMode, Mood, MotionModel, StrokeVisualSignature, TransitionPath, TransitionPoint } from "@/lib/types";
+import type { BrushTreatment, GeometryMode, Mood, MotionModel, StrokeVisualSignature, TransitionPath, TransitionPoint } from "@/lib/types";
 import { hashStr } from "@/simulation/rng";
 import { buildMotionPath, MOTION_PATTERN_BY_GEOMETRY } from "./motionPattern";
 
@@ -59,6 +59,41 @@ interface SignatureSource {
   seed?: number;
   geometryMode?: GeometryMode;
   motionModel?: MotionModel;
+  generationMode?: TransitionPath["generation_mode"];
+  brushTreatment?: BrushTreatment;
+}
+
+/**
+ * A continuous, count-only contrast curve calibrated to actual 5–16-word
+ * journeys. The old /63 normalization packed nearly all of them into tiny or
+ * medium marks. These knots spread that common range across short, medium and
+ * long travel, while still giving every extra word up to 64 more distance.
+ * Neither the category nor the renderer changes the agent's chosen word count.
+ */
+export const AGENT_LENGTH_KNOTS: readonly (readonly [number, number])[] = [
+  [1, 0], [2, 0.014], [4, 0.03], [6, 0.07], [8, 0.18],
+  [12, 0.62], [16, 0.9], [24, 1.02], [64, 1.12],
+];
+
+/** Target travelled distance before fitting, in normalized square-canvas units. */
+export function agentAuthoredDistance(anchorCount: number): number {
+  const count = Number.isFinite(anchorCount) ? clamp(anchorCount, 1, 64) : 1;
+  for (let i = 1; i < AGENT_LENGTH_KNOTS.length; i++) {
+    const [hiCount, hiDistance] = AGENT_LENGTH_KNOTS[i];
+    if (count <= hiCount) {
+      const [loCount, loDistance] = AGENT_LENGTH_KNOTS[i - 1];
+      return mix(loDistance, hiDistance, (count - loCount) / (hiCount - loCount));
+    }
+  }
+  return 1.12;
+}
+
+/** Encode the contrast curve in the existing length/category display contract. */
+export function agentAuthoredLength(anchorCount: number): number {
+  const travel = agentAuthoredDistance(anchorCount) / 1.12;
+  if (travel < 0.1) return travel * 50;
+  if (travel <= 0.5) return 5 + (travel - 0.1) / 0.4;
+  return 6 + (travel - 0.5) * 30;
 }
 
 const avg = (pts: TransitionPoint[], key: "entropy" | "confidence" | "intensity") =>
@@ -77,7 +112,9 @@ export function createVisualSignature(source: SignatureSource): StrokeVisualSign
 
   // Duration provides travelled time; semantic depth provides travelled ideas.
   const lengthEnergy = duration01 * 0.62 + depth01 * 0.28 + intensity * 0.1;
-  const length = intensity < 0.015 ? 0 : 21 * Math.pow(clamp(lengthEnergy, 0, 1), 2.25);
+  const length = source.generationMode
+    ? agentAuthoredLength(points.length)
+    : intensity < 0.015 ? 0 : 21 * Math.pow(clamp(lengthEnergy, 0, 1), 2.25);
   const length_class = length < 5 ? "short" : length <= 6 ? "medium" : "long";
 
   // Preserve the original width logic, but express it in canvas-relative units.
@@ -98,7 +135,8 @@ export function createVisualSignature(source: SignatureSource): StrokeVisualSign
   // Generated paths occupy a comparatively narrow intensity band. These
   // calibrated quartiles keep all tools legible while remaining a deterministic
   // reading of path intensity (never a random style choice).
-  const brush_style = intensity < 0.7 ? "hard" : intensity < 0.76 ? "soft" : intensity < 0.83 ? "watercolor" : "texture";
+  const original_brush_style = intensity < 0.7 ? "hard" : intensity < 0.76 ? "soft" : intensity < 0.83 ? "watercolor" : "texture";
+  const brush_style = source.brushTreatment === "calligraphy" ? "calligraphy" : original_brush_style;
   const styleHead = {
     hard: "square", soft: "round", watercolor: "ring", texture: "organic",
   } as const;
@@ -109,7 +147,7 @@ export function createVisualSignature(source: SignatureSource): StrokeVisualSign
   const motionHead = {
     continuous: "round", segmented: "square", jitter: "organic", wave: "ring", burst: "triangle",
   } as const;
-  const brush_heads = [styleHead[brush_style]] as StrokeVisualSignature["brush_heads"];
+  const brush_heads = [styleHead[original_brush_style]] as StrokeVisualSignature["brush_heads"];
   if (branchTotal > 0) brush_heads.push(geometryHead[geometryMode ?? "curved"]);
   if (entropy > 0.68) brush_heads.push(motionHead[motionModel ?? "continuous"]);
 
@@ -220,6 +258,8 @@ export function resolveVisualSignature(path: TransitionPath, baseHue = 210): Str
     seed: path.variation_seed ?? path.base_seed ?? hashStr(path.id),
     geometryMode: path.geometry_mode,
     motionModel: path.motion_model,
+    generationMode: path.generation_mode,
+    brushTreatment: path.brush_treatment,
   });
 }
 

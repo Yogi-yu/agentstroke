@@ -1,0 +1,33 @@
+.sphere-view { overflow: hidden; background: #010406; }
+.sphere-viewport { position: absolute; inset: 0 0 110px; }
+.sphere-view.has-external-controls .sphere-viewport { inset: 0; }
+.sphere-viewport canvas { display: block; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+.sphere-viewport canvas.is-dragging { cursor: grabbing; }
+.sphere-viewport canvas:focus-visible { outline: 1px solid #8ad7d0; outline-offset: -4px; }
+.sphere-toolbar { position: absolute; bottom: 12px; left: 12px; right: 12px; text-align: center; color: #c4d7dc; }
+.sphere-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; }
+.sphere-actions button { min-height: 42px; padding: 8px 11px; font-size: 14px; border: 1px solid #395359; border-radius: 8px; color: #d9ecec; background: #0b181e; }
+.sphere-actions button[aria-pressed="true"] { border-color: #92d9d1; color: #bceee5; }
+.sphere-actions button:focus-visible { outline: 2px solid #bceee5; outline-offset: 2px; }
+.sphere-toolbar p { margin: 8px 0 4px; font-size: 14px; }
+.sphere-toolbar > span { font-size: 14px; color: #91a9b0; }
+.sphere-error { position: absolute; inset: 40% 20px auto; text-align: center; color: #ffd0cf; font-size: 16px; }
+.app:not(.cinematic) .canvas-stage > .sphere-view { inset: 132px calc(clamp(280px, 23.5vw, 380px) + 38px) 132px; }
+.app.cinematic .sphere-view { inset: 44px 0 24px; }
+@media (min-width: 1025px) {
+  .app[data-canvas-mode="sphere"] .sidebar { width: clamp(280px, 23.5vw, 380px); }
+  .app[data-canvas-mode="sphere"] .econ-top,
+  .app[data-canvas-mode="sphere"] .econ-cat-row { flex-wrap: wrap; }
+  .app[data-canvas-mode="sphere"] .econ-id-group { flex: 1 1 170px; }
+  .app[data-canvas-mode="sphere"] .econ-name { white-space: normal; overflow: visible; }
+  .app[data-canvas-mode="sphere"] .econ-rev { max-width: 100%; white-space: normal; overflow-wrap: anywhere; margin-left: 0; }
+}
+@media (max-width: 1024px) {
+  .app:not(.cinematic) .canvas-stage > .sphere-view { inset: 128px 0 160px; }
+}
+@media (max-width: 600px) {
+  .app:not(.cinematic) .canvas-stage > .sphere-view { inset: 174px 0 160px; }
+  .sphere-viewport { bottom: 126px; }
+  .sphere-actions { gap: 4px; }
+  .sphere-actions button { padding: 8px; }
+}

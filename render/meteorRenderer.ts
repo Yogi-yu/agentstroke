@@ -5,6 +5,9 @@ import { resolveVisualSignature, sampleWidthProfile } from "@/engine/visualSigna
 import { hashStr } from "@/simulation/rng";
 import { ANIMATED_TRAIL_RETENTION, animatedTrailOpacity, animatedTrailStart, clampTrailRetention } from "@/engine/meteorTrail";
 
+/** A surface adapter may relocate controls without mutating an archived work. */
+export type MeteorStrokeSource = Pick<StrokeStore, "controlPointsOf" | "transformOf">;
+
 interface Point { x: number; y: number }
 interface MeteorSample extends Point {
   nx: number;
@@ -34,10 +37,11 @@ interface RibbonNode extends Point {
   energy: number;
   sample: MeteorSample;
   texture: BrushTextureSample;
+  progress: number;
 }
 
 export interface BrushMaterialConfig {
-  surface: "cut-face" | "ink-belly" | "wet-sediment" | "dry-fibers";
+  surface: "cut-face" | "ink-belly" | "wet-sediment" | "dry-fibers" | "split-ink";
   bodyLightness: number;
   highlightLightness: number;
   rimLightness: number;
@@ -52,6 +56,9 @@ const MATERIAL_CONFIG: Record<BrushStrokeStyle, Readonly<BrushMaterialConfig>> =
   soft: { surface: "ink-belly", bodyLightness: 59, highlightLightness: 76, rimLightness: 21, grooveLightness: 5, sedimentContrast: 12, edgeRoughness: 0.18, fiberCount: 3 },
   watercolor: { surface: "wet-sediment", bodyLightness: 67, highlightLightness: 86, rimLightness: 23, grooveLightness: 37, sedimentContrast: 38, edgeRoughness: 0.62, fiberCount: 0 },
   texture: { surface: "dry-fibers", bodyLightness: 67, highlightLightness: 84, rimLightness: 25, grooveLightness: 2, sedimentContrast: 24, edgeRoughness: 0.31, fiberCount: 5 },
+  // Calligraphy has a matte, loaded face rather than a pale wash or glossy
+  // bevel. Its dry channels are unpainted gaps, not an opacity simulation.
+  calligraphy: { surface: "split-ink", bodyLightness: 59, highlightLightness: 62, rimLightness: 47, grooveLightness: 2, sedimentContrast: 8, edgeRoughness: 0.46, fiberCount: 7 },
 };
 
 /** Read-only material recipe, also used by the attribute inspector and QA. */
@@ -140,6 +147,41 @@ export interface BrushMaterialSample {
   fiberCount: number;
 }
 
+export interface CalligraphyBundle { low: number; high: number }
+
+/**
+ * Seven connected brush-hair bundles across one nib. Their moving boundaries
+ * leave real unpainted longitudinal gaps. A central ink spine is never cut,
+ * so these are surface fissures in one stroke, not seven separate trajectories.
+ * Wet/high-pressure ink closes the gaps; a lifted, drying nib opens them.
+ */
+export function sampleCalligraphyBundles(texture: BrushTextureSample, progress: number, bodyWidth = 12): CalligraphyBundle[] {
+  const t = clamp(progress, 0, 1);
+  const settle = clamp((t - 0.28) / 0.46, 0, 1);
+  // Subpixel hairs would look like disconnected specks. A lifted/narrow nib
+  // closes its fissures and retains one legible continuous hairline instead.
+  const readableSplits = clamp((bodyWidth - 2.4) / 3.6, 0, 1);
+  const drying = clamp((0.15 + texture.dryness * 0.54 + t * 0.35 + (1 - texture.pigmentLoad) * 0.16)
+    * settle * settle * (3 - 2 * settle) * readableSplits, 0, 0.92);
+  const centers = [-0.84, -0.61, -0.3, 0.23, 0.51, 0.81];
+  const bundles: CalligraphyBundle[] = [];
+  let edge = -1;
+  for (let i = 0; i < centers.length; i++) {
+    // The coherent, slowly drifting splits have different lengths/widths,
+    // unlike evenly spaced parallel vector stripes or scattered spray dots.
+    const wave = Math.sin(t * (13 + i * 2.3) + texture.grain * 2.1 + i * 1.9);
+    const center = centers[i] + wave * 0.028 + texture.grooveOffset * 0.13;
+    const opening = clamp((settle - [0, 0.28, 0.05, 0.43, 0.17, 0.36][i]) * 1.8, 0, 1);
+    const split = drying * opening * (0.065 + (i % 3) * 0.031) * (0.64 + (wave + 1) * 0.22);
+    const low = clamp(center - split, edge, i < 3 ? -0.12 : 1);
+    const high = clamp(center + split, i < 3 ? -1 : 0.12, 1);
+    bundles.push({ low: edge, high: low });
+    edge = high;
+  }
+  bundles.push({ low: edge, high: 1 });
+  return bundles;
+}
+
 /** Prevent several pressure peaks from becoming round beads on a short mark. */
 export function getBrushDisplayLimits(pathPixels: number, widthChanges: number, nominalTipLength: number) {
   const length = Math.max(0, pathPixels);
@@ -164,6 +206,23 @@ export function sampleBrushMaterial(
   const t = clamp(progress, 0, 1);
   const mass = clamp(0.88 + widthRatio * 80, 0.9, 1.38) * clamp(scale, 0.75, 1.35);
   const belly = Math.pow(Math.max(0, Math.sin(Math.PI * t)), 0.6);
+  if (style === "calligraphy") {
+    // A loaded shoulder, pressure-driven belly and lifted finish. Unlike the
+    // symmetric soft nib, its weight is carried early and narrows into a swash.
+    const landing = clamp(t / 0.055, 0, 1);
+    const lifting = clamp((1 - t) / 0.2, 0, 1);
+    const unload = clamp((t - 0.24) / 0.48, 0, 1);
+    const inkLoad = 0.48 * (1 - unload * unload * (3 - 2 * unload));
+    const envelope = (0.42 + 0.58 * landing * landing * (3 - 2 * landing))
+      * (0.045 + 0.955 * Math.pow(lifting, 0.76));
+    const nibProjection = 0.76 + 0.24 * Math.abs(Math.sin(tangentAngle - 0.65));
+    return {
+      width: clamp(7.4 * mass * Math.pow(p + inkLoad, 1.45) * envelope * nibProjection, 0.28, 12),
+      edgeBias: 0.1 * Math.sin(t * Math.PI * 1.6 + 0.4),
+      tipLength: 19,
+      fiberCount: 7,
+    };
+  }
   if (style === "hard") {
     // A fixed 35-degree chisel becomes broad or thin as travel changes direction.
     const nibProjection = 0.3 + 0.7 * Math.abs(Math.sin(tangentAngle - Math.PI * 35 / 180));
@@ -310,7 +369,7 @@ export class MeteorRenderer {
     this.cache.clear();
   }
 
-  private geometry(path: TransitionPath, store: StrokeStore): MeteorGeometry {
+  private geometry(path: TransitionPath, store: MeteorStrokeSource): MeteorGeometry {
     const controls = store.controlPointsOf(path.id);
     const hue = (this.agentsById.get(path.agent_id)?.style.hue ?? 210) + (path.mood?.color_variation ?? 0) * 40;
     const cached = this.cache.get(path.id);
@@ -347,7 +406,7 @@ export class MeteorRenderer {
         ny: dx / distance,
         pressure,
         texture,
-        color: `hsl(${pigment.toFixed(1)} 82% ${faceLightness.toFixed(2)}%)`,
+        color: `hsl(${pigment.toFixed(1)} ${signature.brush_style === "calligraphy" ? 68 : 82}% ${faceLightness.toFixed(2)}%)`,
         core: `hsl(${pigment.toFixed(1)} 61% ${(config.highlightLightness + pigmentVariation * 0.4).toFixed(2)}%)`,
         rim: `hsl(${pigment.toFixed(1)} 88% ${(config.rimLightness + pigmentVariation * 0.55).toFixed(2)}%)`,
         groove: `hsl(${pigment.toFixed(1)} 52% ${config.grooveLightness}%)`,
@@ -362,7 +421,7 @@ export class MeteorRenderer {
     _time: number,
     paths: TransitionPath[],
     agents: Agent[],
-    store: StrokeStore,
+    store: MeteorStrokeSource,
     focusId: string | null,
     filterAgentId: string | null,
     view: CanvasTransformState,
@@ -490,7 +549,8 @@ export class MeteorRenderer {
         ? Math.pow(clamp(1 - (progress - t) / tailSpan, 0, 1), 1.2)
         : animatedTrailOpacity(progress, t, trailRetention);
       let taper = 1;
-      if (style === "soft") taper = 0.025 + 0.975 * Math.pow(Math.sin(tipPhase * Math.PI / 2), 1.3);
+      if (style === "calligraphy") taper = Math.pow(Math.sin(tipPhase * Math.PI / 2), 1.85);
+      else if (style === "soft") taper = 0.025 + 0.975 * Math.pow(Math.sin(tipPhase * Math.PI / 2), 1.3);
       else if (style === "watercolor") taper = 0.04 + 0.96 * Math.sqrt(Math.max(0, 1 - (1 - tipPhase) ** 2));
       else if (style === "texture") taper = 0.72 + tipPhase * 0.28;
       const tailWidth = retainTrace ? 1 : 0.22 + Math.pow(tail, 0.6) * 0.78;
@@ -504,13 +564,14 @@ export class MeteorRenderer {
         nx, ny,
         width,
         texture,
+        progress: t,
         bias: material.edgeBias,
         // Keep edge retreat slower than centreline advance; otherwise a broad
         // chisel can fold its last quad backward and resemble a forked tip.
         cutback: Math.min(tipLength * 0.42, style === "hard" ? width * 0.6 : style === "texture" ? width * 0.28 : 0) * (1 - tipPhase) ** 2,
         // Completed comparison/detail frames keep pigment readable instead of
         // fading the very surface detail the viewer is trying to inspect.
-        energy: opacity * (retainTrace ? 0.82 + tail * 0.18 : tail),
+        energy: opacity * (retainTrace ? style === "calligraphy" ? 1 : 0.82 + tail * 0.18 : tail),
         sample: f < 0.5 ? a : b,
       });
     }
@@ -518,8 +579,10 @@ export class MeteorRenderer {
     // The shared halo is deliberately weaker than the pigment surface. Each
     // instrument has its own internal deposit/edge structure inside one ribbon.
     const halo = style === "hard" ? 1.35 : style === "watercolor" ? 1.25 : 1.35;
-    this.drawBand(nodes, -halo, halo, retainTrace ? 0.018 : 0.035, "color", zoom);
-    if (style === "hard") {
+    if (style !== "calligraphy") this.drawBand(nodes, -halo, halo, retainTrace ? 0.018 : 0.035, "color", zoom);
+    if (style === "calligraphy") {
+      this.drawCalligraphy(nodes, zoom, retainTrace && signature.color_count === 1);
+    } else if (style === "hard") {
       // A solid, cleanly cut face with a narrow bevel, not a luminous tube.
       this.drawBand(nodes, -1, 1, 1, "color", zoom);
       this.drawBand(nodes, 0.62, 1, 0.76, "rim", zoom);
@@ -545,6 +608,52 @@ export class MeteorRenderer {
       this.drawFibers(nodes, zoom, 5, "texture");
     }
     return from;
+  }
+
+  private drawCalligraphy(nodes: RibbonNode[], zoom: number, singlePigment: boolean): void {
+    const sections = new Map(nodes.map((node) => [node, sampleCalligraphyBundles(node.texture, node.progress, node.width)]));
+    // Do not lay a full-width undercoat beneath these bundles: the clear splits
+    // are genuine missing pigment and can show stars or an earlier stroke.
+    // Every bundle joins the loaded entry and all are swept along one centreline.
+    const ctx = this.context;
+    const chunkSize = singlePigment ? nodes.length - 1 : 16;
+    for (let start = 0; start < nodes.length - 1;) {
+      let end = Math.min(nodes.length - 1, start + chunkSize);
+      // A local chord must track travelled distance even through a reversal.
+      // Never project an entire loop's palette/alpha onto its near-zero chord.
+      if (!singlePigment) while (end > start + 1) {
+        let arc = 0;
+        for (let i = start + 1; i <= end; i++) arc += Math.hypot(nodes[i].x - nodes[i - 1].x, nodes[i].y - nodes[i - 1].y);
+        if (Math.hypot(nodes[end].x - nodes[start].x, nodes[end].y - nodes[start].y) >= arc * 0.9) break;
+        end = start + Math.max(1, Math.floor((end - start) / 2));
+      }
+      const a = nodes[start], b = nodes[end];
+      if (singlePigment) {
+        // A retained monochrome face is loaded matte ink, not a spatial wash.
+        // Solid fill also remains well-defined for a closed loop's zero chord.
+        ctx.fillStyle = nodes[Math.floor(nodes.length / 2)].sample.color;
+        ctx.globalAlpha = a.energy;
+      } else {
+        const gradient = ctx.createLinearGradient(a.x, a.y, b.x + 0.00001, b.y);
+        for (let i = start; i <= end; i++) {
+          const node = nodes[i];
+          gradient.addColorStop(clamp((node.progress - a.progress) / Math.max(0.0000001, b.progress - a.progress), 0, 1),
+            node.sample.color.replace(")", ` / ${clamp(node.energy, 0, 1).toFixed(4)})`));
+        }
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = gradient;
+      }
+      ctx.beginPath();
+      for (let bundle = 0; bundle < 7; bundle++) {
+        for (let i = start; i <= end; i++) this.ribbonVertex(nodes[i], sections.get(nodes[i])![bundle].high, zoom, i === start);
+        for (let i = end; i >= start; i--) this.ribbonVertex(nodes[i], sections.get(nodes[i])![bundle].low, zoom);
+        ctx.closePath();
+      }
+      // Fill all touching wet bundles as one compound surface. Individually
+      // anti-aliased adjacent fills would fabricate a woven grid in solid ink.
+      ctx.fill();
+      start = end;
+    }
   }
 
   private ribbonVertex(node: RibbonNode, fraction: number, zoom: number, move = false): void {

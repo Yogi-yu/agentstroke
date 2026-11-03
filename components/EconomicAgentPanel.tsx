@@ -18,6 +18,7 @@ import { DEFAULT_REWARD_SYSTEM } from "@/lib/types";
 import { categoryHue, categoryLabel } from "@/lib/agents";
 import { orderAgentsForSelection } from "@/lib/agentListOrder";
 import { appStore, useApp } from "@/state/appStore";
+import StorageNotice from "@/components/StorageNotice";
 
 interface Props {
   /** Locked out while Edit Mode is active. */
@@ -45,6 +46,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
   const [now, setNow] = useState(() => Date.now());
   const [confirmDelete, setConfirmDelete] = useState<AgentProfile | null>(null);
   const [confirmClearAgents, setConfirmClearAgents] = useState(false);
+  const [changingAgents, setChangingAgents] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
   // 1s heartbeat so idle times + the "attracted" window stay live.
@@ -90,7 +92,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
           <button
             className="econ-clear-agents"
             disabled={disabled || agents.length === 0}
-            onClick={() => setConfirmClearAgents(true)}
+            onClick={() => { appStore.dismissStorageError(); setConfirmClearAgents(true); }}
           >
             Clear all
           </button>
@@ -179,9 +181,9 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
                   {!disabled && (
                     <button
                       className="econ-del"
-                      title={`Delete ${a.name}`}
-                      aria-label={`Delete ${a.name}`}
-                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); setConfirmDelete(a); }}
+                      title={`Remove ${a.name} from your available agents`}
+                      aria-label={`Remove ${a.name} from your available agents`}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); appStore.dismissStorageError(); setConfirmDelete(a); }}
                     >
                       🗑
                     </button>
@@ -218,22 +220,29 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
         })}
       </div>
 
-      {/* Delete confirmation — server-authoritative removal (+ stroke cascade). */}
+      {/* Pool membership changes do not delete an agent's artwork. */}
       {confirmDelete && (
-        <div className="modal-overlay" onClick={() => setConfirmDelete(null)}>
+        <div className="modal-overlay" onClick={() => { if (!changingAgents) setConfirmDelete(null); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Delete agent?</h3>
+            <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
-              This removes <b>{confirmDelete.name}</b> ({confirmDelete.occupation}) and all of its
-              strokes from the canvas. This cannot be undone.
+              This removes <b>{confirmDelete.name}</b> ({confirmDelete.occupation}) from your available pool only.
+              All of its strokes stay on your canvas and in the Archive with their original authorship.
+              You can attract this agent again later.
             </p>
+            <StorageNotice />
             <div className="modal-actions">
-              <button className="mini" onClick={() => setConfirmDelete(null)}>Cancel</button>
+              <button className="mini" disabled={changingAgents} onClick={() => setConfirmDelete(null)}>Cancel</button>
               <button
                 className="mini reject danger"
-                onClick={() => { void appStore.deleteAgent(confirmDelete.id); setConfirmDelete(null); }}
+                disabled={changingAgents}
+                onClick={async () => {
+                  setChangingAgents(true);
+                  try { if (await appStore.deleteAgent(confirmDelete.id)) setConfirmDelete(null); }
+                  finally { setChangingAgents(false); }
+                }}
               >
-                Delete
+                {changingAgents ? "Removing…" : "Remove agent"}
               </button>
             </div>
           </div>
@@ -241,19 +250,25 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
       )}
 
       {confirmClearAgents && (
-        <div className="modal-overlay" onClick={() => setConfirmClearAgents(false)}>
+        <div className="modal-overlay" onClick={() => { if (!changingAgents) setConfirmClearAgents(false); }}>
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="clear-agents-title" onClick={(e) => e.stopPropagation()}>
             <h3 id="clear-agents-title" className="modal-title">Clear all agents?</h3>
             <p className="modal-body">
-              This removes all <b>{agents.length}</b> agents from the available pool. Historical strokes stay on the canvas with their original provenance, and agents can be attracted again later.
+              This removes all <b>{agents.length}</b> agents from your available pool. All artworks stay on your canvas and in the Archive with their original provenance. Other visitors are not affected, and agents can be attracted again later.
             </p>
+            <StorageNotice />
             <div className="modal-actions">
-              <button className="mini" onClick={() => setConfirmClearAgents(false)}>Cancel</button>
+              <button className="mini" disabled={changingAgents} onClick={() => setConfirmClearAgents(false)}>Cancel</button>
               <button
                 className="mini reject danger"
-                onClick={() => { void appStore.clearAgents(); setConfirmClearAgents(false); }}
+                disabled={changingAgents}
+                onClick={async () => {
+                  setChangingAgents(true);
+                  try { if (await appStore.clearAgents()) setConfirmClearAgents(false); }
+                  finally { setChangingAgents(false); }
+                }}
               >
-                Clear all agents
+                {changingAgents ? "Clearing…" : "Clear available agents"}
               </button>
             </div>
           </div>

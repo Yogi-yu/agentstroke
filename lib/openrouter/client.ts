@@ -8,8 +8,8 @@
 //   HTTP-Referer:  <site url>                      (attribution)
 //   X-Title:       Noema · Agent Snapshot
 //
-// Returns null when no API key is configured, so callers transparently fall back
-// to the synthetic engine (Requirement #6 — never break the system).
+// Returns null when no API key is configured. Stroke requests report that
+// configuration error; they never present synthetic data as agent-authored work.
 // ============================================================================
 
 import OpenAI from "openai";

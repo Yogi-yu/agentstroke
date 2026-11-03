@@ -15,12 +15,15 @@ import StrokeListPanel from "@/components/StrokeListPanel";
 import StrokeInspector from "@/components/StrokeInspector";
 import EconomicAgentPanel from "@/components/EconomicAgentPanel";
 import TrailRetentionControl from "@/components/TrailRetentionControl";
+import CanvasPlaybackControls from "@/components/CanvasPlaybackControls";
+import StorageNotice from "@/components/StorageNotice";
 import type { Agent, EditModeState, StrokeTransform, UIState } from "@/lib/types";
 import { agentRenderStyle } from "@/lib/agents";
 import { IDENTITY_TRANSFORM } from "@/store/transformStore";
 import { appStore, useApp } from "@/state/appStore";
-import type { CanvasDisplayMode } from "@/engine/canvasPresentation";
+import { readCanvasDisplayMode, type CanvasDisplayMode } from "@/engine/canvasPresentation";
 import { ANIMATED_TRAIL_RETENTION, clampTrailRetention } from "@/engine/meteorTrail";
+import { DEFAULT_MOTION_SPEED, DEFAULT_SPHERE_CONTROLS, clampMotionSpeed, type SphereViewControls } from "@/engine/playbackControls";
 
 const ROTATE_STEP = Math.PI / 24; // 7.5° per keyboard rotate press
 
@@ -38,27 +41,41 @@ export default function Home() {
   // ---- edit mode state (Issue 1) ----
   const [edit, setEdit] = useState<EditModeState>({ active: false, selected_stroke_id: null });
   const [transforms, setTransforms] = useState<Record<string, StrokeTransform>>({});
+  const transformRequests = useRef(new Map<string, number>());
+  const [saving, setSaving] = useState(false);
   const canvasRef = useRef<CanvasHandle>(null);
   const [displayMode, setDisplayMode] = useState<CanvasDisplayMode>("animated");
   const [trailRetention, setTrailRetention] = useState(ANIMATED_TRAIL_RETENTION);
+  const [motionSpeed, setMotionSpeed] = useState(DEFAULT_MOTION_SPEED);
+  const [sphereControls, setSphereControls] = useState<SphereViewControls>({ ...DEFAULT_SPHERE_CONTROLS });
 
   useEffect(() => {
     try {
-      if (localStorage.getItem("noema.snapshot.display-mode") === "static") setDisplayMode("static");
+      setDisplayMode(readCanvasDisplayMode(localStorage.getItem("noema.snapshot.display-mode")));
     } catch { /* A disabled browser storage must not prevent changing modes. */ }
     try {
       const saved = localStorage.getItem("noema.snapshot.trail-retention");
       if (saved !== null && saved.trim() !== "") setTrailRetention(clampTrailRetention(Number(saved)));
     } catch { /* Retention remains usable when browser storage is unavailable. */ }
+    try {
+      const saved = localStorage.getItem("noema.snapshot.motion-speed");
+      if (saved !== null && saved.trim() !== "") setMotionSpeed(clampMotionSpeed(Number(saved)));
+    } catch { /* Motion remains usable without storage. */ }
   }, []);
-  const changeDisplayMode = (mode: CanvasDisplayMode) => {
+  const changeDisplayMode = useCallback((mode: CanvasDisplayMode) => {
+    if (edit.active) return;
     setDisplayMode(mode);
     try { localStorage.setItem("noema.snapshot.display-mode", mode); } catch { /* Session-only mode is still usable. */ }
-  };
+  }, [edit.active]);
   const changeTrailRetention = (value: number) => {
     const retention = clampTrailRetention(value);
     setTrailRetention(retention);
     try { localStorage.setItem("noema.snapshot.trail-retention", String(retention)); } catch { /* Keep the live session preference. */ }
+  };
+  const changeMotionSpeed = (value: number) => {
+    const speed = clampMotionSpeed(value);
+    setMotionSpeed(speed);
+    try { localStorage.setItem("noema.snapshot.motion-speed", String(speed)); } catch { /* Session-only preference. */ }
   };
 
   const setCinematic = (on: boolean) => setUI((s) => ({ ...s, cinematic_mode: on }));
@@ -89,8 +106,9 @@ export default function Home() {
     [agents],
   );
 
-  // ---- delete (Issue 1) — confirmation-gated, then GLOBAL removal ----
+  // ---- hide from this canvas; artworks remain in the archive ----
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [removing, setRemoving] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [clearError, setClearError] = useState<string | null>(null);
@@ -120,37 +138,54 @@ export default function Home() {
     (id?: string) => {
       const target = id ?? ui.selected_stroke;
       if (!target) return;
+      // Geometry editing stays on the original plane. Rotating the sphere is
+      // a presentation-only camera gesture, never a persisted stroke edit.
+      if (displayMode === "sphere") changeDisplayMode("animated");
       setUI((s) => ({ ...s, selected_stroke: target }));
       setEdit({ active: true, selected_stroke_id: target });
     },
-    [ui.selected_stroke],
+    [ui.selected_stroke, displayMode, changeDisplayMode],
   );
   const exitEdit = useCallback(() => setEdit({ active: false, selected_stroke_id: null }), []);
 
   // Touch-first: long-pressing a stroke enters edit mode; on mobile, jump to the
   // Canvas tab so the user can immediately drag / pinch / rotate it.
   const onRequestEdit = useCallback((id: string) => {
+    if (displayMode === "sphere") changeDisplayMode("animated");
     setUI((s) => ({ ...s, selected_stroke: id, active_mobile_tab: "canvas" }));
     setEdit({ active: true, selected_stroke_id: id });
-  }, []);
+  }, [displayMode, changeDisplayMode]);
 
-  // Every edit operation (drag / rotate / keyboard) writes back immediately:
-  // local mirror for live UI + server for durability across refresh (Issue 2).
-  const onTransformCommit = useCallback((id: string, t: StrokeTransform) => {
+  const saveTransform = useCallback(async (id: string, t: StrokeTransform, immediately = false) => {
+    const request = (transformRequests.current.get(id) ?? 0) + 1;
+    transformRequests.current.set(id, request);
     setTransforms((m) => ({ ...m, [id]: t }));
-    void appStore.persistTransform(id, t);
+    const saved = await appStore.persistTransform(id, t, immediately);
+    if (!saved && transformRequests.current.get(id) === request) {
+      const confirmed = appStore.getSnapshot().strokes.find((stroke) => stroke.id === id)?.transform ?? IDENTITY_TRANSFORM;
+      canvasRef.current?.restoreTransform(id, confirmed);
+      setTransforms((m) => ({ ...m, [id]: confirmed }));
+    }
+    return saved;
   }, []);
+  const onTransformCommit = useCallback((id: string, t: StrokeTransform) => { void saveTransform(id, t); }, [saveTransform]);
 
   // "Save & Exit" (Issue 2 · Step 2): persist the focused stroke's transform,
   // then leave edit mode and re-enable normal interaction.
-  const saveAndExit = useCallback(() => {
+  const saveAndExit = useCallback(async () => {
+    if (saving) return;
     const id = edit.selected_stroke_id;
-    if (id) {
-      const t = transforms[id] ?? canvasRef.current?.transformOf(id) ?? IDENTITY_TRANSFORM;
-      void appStore.persistTransform(id, t);
+    setSaving(true);
+    try {
+      if (id) {
+        const t = transforms[id] ?? canvasRef.current?.transformOf(id) ?? IDENTITY_TRANSFORM;
+        if (!await saveTransform(id, t, true)) return;
+      }
+      exitEdit();
+    } finally {
+      setSaving(false);
     }
-    exitEdit();
-  }, [edit.selected_stroke_id, transforms, exitEdit]);
+  }, [edit.selected_stroke_id, transforms, exitEdit, saveTransform, saving]);
 
   const onToggleEdit = useCallback(() => {
     if (edit.active) saveAndExit();
@@ -161,22 +196,22 @@ export default function Home() {
     const id = edit.selected_stroke_id;
     if (!id) return;
     canvasRef.current?.resetTransform(id);
-    setTransforms((m) => ({ ...m, [id]: IDENTITY_TRANSFORM }));
-    void appStore.persistTransform(id, IDENTITY_TRANSFORM);
-  }, [edit.selected_stroke_id]);
+    void saveTransform(id, IDENTITY_TRANSFORM);
+  }, [edit.selected_stroke_id, saveTransform]);
 
   // ---- delete handlers ----
-  const onRequestDelete = useCallback((id: string) => setConfirmDeleteId(id), []);
-  const onConfirmDelete = useCallback(() => {
+  const onRequestDelete = useCallback((id: string) => { appStore.dismissStorageError(); setConfirmDeleteId(id); }, []);
+  const onConfirmDelete = useCallback(async () => {
     const id = confirmDeleteId;
-    if (!id) return;
-    if (edit.selected_stroke_id === id) exitEdit();
-    setUI((s) =>
-      s.selected_stroke === id ? { ...s, selected_stroke: null, highlighted_agent_id: null } : s,
-    );
-    void appStore.deleteStroke(id);
-    setConfirmDeleteId(null);
-  }, [confirmDeleteId, edit.selected_stroke_id, exitEdit]);
+    if (!id || removing) return;
+    setRemoving(true);
+    try {
+      if (!await appStore.deleteStroke(id)) return;
+      if (edit.selected_stroke_id === id) exitEdit();
+      setUI((s) => s.selected_stroke === id ? { ...s, selected_stroke: null, highlighted_agent_id: null } : s);
+      setConfirmDeleteId(null);
+    } finally { setRemoving(false); }
+  }, [confirmDeleteId, edit.selected_stroke_id, exitEdit, removing]);
 
   // ---- keyboard layer ----
   // Edit active: R / Shift+R rotate, ESC exits edit. Otherwise ESC exits cinematic.
@@ -202,7 +237,7 @@ export default function Home() {
 
   // Creation does NOT happen on this page — it lives solely on the agent detail
   // page (the only valid creation entry point). This page is view + inspect.
-  // Clearing the canvas is gated behind a confirmation (it wipes every stroke).
+  // Clearing hides this visitor's Snapshot and Sky views, never the archive.
   const onRequestClear = useCallback(() => {
     setClearError(null);
     setConfirmClear(true);
@@ -248,7 +283,7 @@ export default function Home() {
   const cinematic = ui.cinematic_mode;
 
   return (
-    <main className={`app${cinematic ? " cinematic" : ""}`} data-mtab={ui.active_mobile_tab}>
+    <main className={`app${cinematic ? " cinematic" : ""}`} data-mtab={ui.active_mobile_tab} data-canvas-mode={displayMode}>
       {/* Mobile-only top bar (≤1024px): app title + mode indicator + tab switcher. */}
       {!cinematic && (
         <header className="mobile-topbar">
@@ -257,7 +292,8 @@ export default function Home() {
             <Link href="/" className="studio-home-link">Noema</Link>
             <span className="brand-name">EXP 001 · Agent Snapshot</span>
             <Link href="/protocol" className="studio-protocol-link">Protocol</Link>
-            <Link href="/sky" className="studio-protocol-link" aria-label="Sky · 10 strokes" title="Sky · 10 strokes">Sky</Link>
+            <Link href="/sky" className="studio-protocol-link" aria-label="Sky · 10 or 20 strokes" title="Sky · 10 or 20 strokes">Sky</Link>
+            <Link href="/deck" className="studio-protocol-link">Deck</Link>
             {edit.active && <span className="mtb-mode">editing</span>}
           </div>
           <nav className="mtb-tabs" role="tablist" aria-label="View">
@@ -289,17 +325,25 @@ export default function Home() {
           onRequestEdit={onRequestEdit}
           displayMode={displayMode}
           trailRetention={trailRetention}
+          motionSpeed={motionSpeed}
+          sphereControls={sphereControls}
         />
 
         {!cinematic && (
           <div className="snapshot-display-controls" role="group" aria-label="Canvas display mode">
-            <button type="button" aria-pressed={displayMode === "animated"} onClick={() => changeDisplayMode("animated")}>Animated</button>
-            <button type="button" aria-pressed={displayMode === "static"} onClick={() => changeDisplayMode("static")}>Static · Final form</button>
+            <button type="button" disabled={edit.active} aria-pressed={displayMode === "animated"} onClick={() => changeDisplayMode("animated")}>Animated</button>
+            <button type="button" disabled={edit.active} aria-pressed={displayMode === "static"} onClick={() => changeDisplayMode("static")}>Static · Final form</button>
+            <button type="button" disabled={edit.active} aria-pressed={displayMode === "sphere"} onClick={() => changeDisplayMode("sphere")}>Sphere</button>
           </div>
         )}
 
         {!cinematic && (
+          <CanvasPlaybackControls displayMode={displayMode} editMode={edit.active}
+            trailRetention={trailRetention} onTrailRetentionChange={changeTrailRetention}
+            motionSpeed={motionSpeed} onMotionSpeedChange={changeMotionSpeed}
+            sphereControls={sphereControls} onSphereControlsChange={setSphereControls}>
           <TrailRetentionControl value={trailRetention} onChange={changeTrailRetention} editMode={edit.active} displayMode={displayMode} />
+          </CanvasPlaybackControls>
         )}
 
         {!cinematic && (
@@ -310,8 +354,9 @@ export default function Home() {
               <span className="brand-sub">EXPERIMENT 001 · AGENT SNAPSHOT</span>
             </div>
             <div className="topbar-actions">
-              <Link href="/sky" className="ghost">Sky · 10 strokes</Link>
+              <Link href="/sky" className="ghost">Sky</Link>
               <Link href="/protocol" className="ghost">Protocol</Link>
+              <Link href="/deck" className="ghost">Deck</Link>
               <button className="ghost" onClick={() => setCinematic(true)}>Cinematic mode</button>
             </div>
           </div>
@@ -323,6 +368,8 @@ export default function Home() {
               ? "loading…"
               : edit.active
                 ? "edit mode · drag to move · handle or R / Shift+R to rotate · scroll to resize · SPACE / middle-drag to pan · ESC to exit"
+                : displayMode === "sphere"
+                  ? "sphere view · drag to rotate · click a visible stroke to inspect · edit on the flat canvas"
                 : ui.selected_stroke
                   ? "stroke focus — click Edit Mode to transform it"
                   : "post a creative task to attract agents · open an agent to create strokes · click a stroke to inspect"}
@@ -340,13 +387,14 @@ export default function Home() {
           <div className="mobile-edit-bar">
             <button className="meb-btn" onClick={onResetTransform}>↺ Reset</button>
             <span className="meb-hint">drag to move · pinch to resize / rotate</span>
-            <button className="meb-btn primary" onClick={saveAndExit}>✓ Done</button>
+            <button className="meb-btn primary" disabled={saving} onClick={saveAndExit}>{saving ? "Saving…" : "✓ Done"}</button>
           </div>
         )}
       </div>
 
       {!cinematic && (
         <aside className="sidebar left">
+          <StorageNotice />
           {selectedStroke && (
             <StrokeInspector
               stroke={selectedStroke}
@@ -382,18 +430,19 @@ export default function Home() {
         </aside>
       )}
 
-      {/* Delete confirmation (Issue 1) — gates the GLOBAL stroke removal. */}
+      {/* View-only removal; the original artwork is always retained. */}
       {confirmStroke && (
-        <div className="modal-overlay" onClick={() => setConfirmDeleteId(null)}>
+        <div className="modal-overlay" onClick={() => { if (!removing) setConfirmDeleteId(null); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Delete stroke?</h3>
-            <p className="modal-body">Are you sure you want to delete this stroke?</p>
+            <h3 className="modal-title">Remove from canvas?</h3>
+            <p className="modal-body">Only your canvas changes. This artwork stays saved in the Archive and can be restored.</p>
             <p className="modal-target">
               <b>{confirmStroke.from}</b> → <b>{confirmStroke.to}</b>
             </p>
+            <StorageNotice />
             <div className="modal-actions">
-              <button className="mini" onClick={() => setConfirmDeleteId(null)}>Cancel</button>
-              <button className="mini reject danger" onClick={onConfirmDelete}>Delete</button>
+              <button className="mini" disabled={removing} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+              <button className="mini reject danger" disabled={removing} onClick={onConfirmDelete}>{removing ? "Removing…" : "Remove from canvas"}</button>
             </div>
           </div>
         </div>
@@ -403,16 +452,17 @@ export default function Home() {
       {confirmClear && (
         <div className="modal-overlay" onClick={() => { if (!clearing) setConfirmClear(false); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Clear all strokes?</h3>
+            <h3 className="modal-title">Clear your canvas?</h3>
             <p className="modal-body">
-              This permanently removes all strokes from <b>Agent Snapshot and Sky</b>.
-              All agents will be kept. This cannot be undone.
+              This hides your visible strokes in <b>Agent Snapshot and Sky</b>.
+              Every artwork stays saved in the <Link href="/archive">Archive</Link>, where you can restore it.
+              Your agents and other visitors&apos; canvases are not changed.
             </p>
             {clearError && <p className="modal-body" role="alert">{clearError}</p>}
             <div className="modal-actions">
               <button className="mini" disabled={clearing} onClick={() => setConfirmClear(false)}>Cancel</button>
               <button className="mini reject danger" disabled={clearing} onClick={onConfirmClear}>
-                {clearing ? "Clearing…" : "Clear all strokes"}
+                {clearing ? "Clearing…" : "Clear canvas"}
               </button>
             </div>
           </div>

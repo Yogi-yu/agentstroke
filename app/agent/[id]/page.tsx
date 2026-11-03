@@ -18,6 +18,7 @@ import AgentChatPanel from "@/components/AgentChatPanel";
 import AgentCreationForm from "@/components/AgentCreationForm";
 import AgentDetailMobile from "@/components/AgentDetailMobile";
 import StrokePlayerPanel from "@/components/StrokePlayerPanel";
+import StorageNotice from "@/components/StorageNotice";
 import type { Agent, StrokeTransform } from "@/lib/types";
 import { agentRenderStyle, categoryHue, categoryLabel } from "@/lib/agents";
 import { modelSpec } from "@/lib/openrouter/models";
@@ -44,7 +45,7 @@ export default function AgentDetailPage() {
   const id = params.id;
   const router = useRouter();
   const isMobile = useIsMobile();
-  const { agents, strokes, ready, generating } = useApp();
+  const { agents, strokes, ready, generating, generationError } = useApp();
 
   const [selectedStrokeId, setSelectedStrokeId] = useState<string | null>(null);
   const [previewStrokeId, setPreviewStrokeId] = useState<string | null>(null);
@@ -53,6 +54,8 @@ export default function AgentDetailPage() {
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmDeleteAgent, setConfirmDeleteAgent] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [mutating, setMutating] = useState(false);
+  const transformRequests = useRef(new Map<string, number>());
   const canvasRef = useRef<CanvasHandle>(null);
   const canvasColumnRef = useRef<HTMLElement>(null);
   const playerRef = useRef<HTMLDivElement>(null);
@@ -106,19 +109,32 @@ export default function AgentDetailPage() {
   }, []);
   const exitEdit = useCallback(() => setEditActive(false), []);
 
-  // every transform writes back immediately: local mirror + server persistence
-  const onTransformCommit = useCallback((sid: string, t: StrokeTransform) => {
+  // Live gestures remain responsive; failed database writes visibly roll back.
+  const saveTransform = useCallback(async (sid: string, t: StrokeTransform, immediately = false) => {
+    const request = (transformRequests.current.get(sid) ?? 0) + 1;
+    transformRequests.current.set(sid, request);
     setTransforms((m) => ({ ...m, [sid]: t }));
-    void appStore.persistTransform(sid, t);
-  }, []);
-
-  const saveAndExit = useCallback(() => {
-    if (selectedStrokeId) {
-      const t = transforms[selectedStrokeId] ?? canvasRef.current?.transformOf(selectedStrokeId) ?? IDENTITY_TRANSFORM;
-      void appStore.persistTransform(selectedStrokeId, t);
+    const saved = await appStore.persistTransform(sid, t, immediately);
+    if (!saved && transformRequests.current.get(sid) === request) {
+      const confirmed = appStore.getSnapshot().strokes.find((stroke) => stroke.id === sid)?.transform ?? IDENTITY_TRANSFORM;
+      canvasRef.current?.restoreTransform(sid, confirmed);
+      setTransforms((m) => ({ ...m, [sid]: confirmed }));
     }
-    exitEdit();
-  }, [selectedStrokeId, transforms, exitEdit]);
+    return saved;
+  }, []);
+  const onTransformCommit = useCallback((sid: string, t: StrokeTransform) => { void saveTransform(sid, t); }, [saveTransform]);
+
+  const saveAndExit = useCallback(async () => {
+    if (mutating) return;
+    setMutating(true);
+    try {
+      if (selectedStrokeId) {
+        const t = transforms[selectedStrokeId] ?? canvasRef.current?.transformOf(selectedStrokeId) ?? IDENTITY_TRANSFORM;
+        if (!await saveTransform(selectedStrokeId, t, true)) return;
+      }
+      exitEdit();
+    } finally { setMutating(false); }
+  }, [selectedStrokeId, transforms, exitEdit, mutating, saveTransform]);
 
   const rotate = useCallback(
     (dir: 1 | -1) => {
@@ -130,22 +146,21 @@ export default function AgentDetailPage() {
   const onResetTransform = useCallback(() => {
     if (!selectedStrokeId) return;
     canvasRef.current?.resetTransform(selectedStrokeId);
-    setTransforms((m) => ({ ...m, [selectedStrokeId]: IDENTITY_TRANSFORM }));
-    void appStore.persistTransform(selectedStrokeId, IDENTITY_TRANSFORM);
-  }, [selectedStrokeId]);
+    void saveTransform(selectedStrokeId, IDENTITY_TRANSFORM);
+  }, [selectedStrokeId, saveTransform]);
 
-  // ---- delete (permanent) ----
-  const onConfirmDelete = useCallback(() => {
+  // ---- remove from this canvas, retaining the archived original ----
+  const onConfirmDelete = useCallback(async () => {
     const sid = confirmDeleteId;
-    if (!sid) return;
-    if (selectedStrokeId === sid) {
-      setEditActive(false);
-      setSelectedStrokeId(null);
-    }
-    if (previewStrokeId === sid) setPreviewStrokeId(null);
-    void appStore.deleteStroke(sid);
-    setConfirmDeleteId(null);
-  }, [confirmDeleteId, selectedStrokeId, previewStrokeId]);
+    if (!sid || mutating) return;
+    setMutating(true);
+    try {
+      if (!await appStore.deleteStroke(sid)) return;
+      if (selectedStrokeId === sid) { setEditActive(false); setSelectedStrokeId(null); }
+      if (previewStrokeId === sid) setPreviewStrokeId(null);
+      setConfirmDeleteId(null);
+    } finally { setMutating(false); }
+  }, [confirmDeleteId, selectedStrokeId, previewStrokeId, mutating]);
 
   // ---- keyboard: R / Shift+R rotate, ESC exits edit ----
   useEffect(() => {
@@ -178,6 +193,7 @@ export default function AgentDetailPage() {
 
   return (
     <div className="detail-page">
+      <StorageNotice />
       <div className="detail-topbar">
         <Link href="/studio" className="back-link">← back to studio</Link>
         <div className="detail-title">{agent?.name ?? id}</div>
@@ -241,7 +257,7 @@ export default function AgentDetailPage() {
 
               <div className="dp-section">
                 <button className="btn danger dp-delete" onClick={() => setConfirmDeleteAgent(true)}>
-                  🗑 Delete agent
+                  Remove available agent
                 </button>
               </div>
             </div>
@@ -270,7 +286,7 @@ export default function AgentDetailPage() {
                 {!editActive && selectedInAgent && (
                   <>
                     <button className="mini regen" onClick={() => enterEdit(selectedStrokeId!)}>✏ Edit</button>
-                    <button className="mini reject" onClick={() => setConfirmDeleteId(selectedStrokeId)}>🗑 Delete</button>
+                    <button className="mini reject" onClick={() => setConfirmDeleteId(selectedStrokeId)}>Remove from canvas</button>
                   </>
                 )}
                 {editActive && (
@@ -278,8 +294,8 @@ export default function AgentDetailPage() {
                     <button className="mini" onClick={() => rotate(-1)} title="Rotate counter-clockwise">⟲</button>
                     <button className="mini" onClick={() => rotate(1)} title="Rotate clockwise">⟳</button>
                     <button className="mini regen" onClick={onResetTransform}>↺ Reset</button>
-                    <button className="mini reject" onClick={() => setConfirmDeleteId(selectedStrokeId)}>🗑 Delete</button>
-                    <button className="mini accept" onClick={saveAndExit}>✓ Save &amp; Exit</button>
+                    <button className="mini reject" disabled={mutating} onClick={() => setConfirmDeleteId(selectedStrokeId)}>Remove from canvas</button>
+                    <button className="mini accept" disabled={mutating} onClick={saveAndExit}>{mutating ? "Saving…" : "✓ Save & Exit"}</button>
                   </>
                 )}
                 {!editActive && !selectedInAgent && (
@@ -304,7 +320,7 @@ export default function AgentDetailPage() {
                 onSelectStroke={onSelectStroke}
                 actions={<>
                   <button type="button" className="sd-playback-button" onClick={() => enterEdit(previewStroke.id)}>Edit</button>
-                  <button type="button" className="sd-playback-button" onClick={() => setConfirmDeleteId(previewStroke.id)}>Delete</button>
+                  <button type="button" className="sd-playback-button" onClick={() => setConfirmDeleteId(previewStroke.id)}>Remove from canvas</button>
                 </>}
               />
             </div>
@@ -314,13 +330,14 @@ export default function AgentDetailPage() {
           <div className="panel detail-creation">
             <div className="panel-head">
               <h2>Create Stroke</h2>
-              <span className="muted">A → B · in agent context</span>
+              <span className="muted">Agent-led exploration</span>
             </div>
             <AgentCreationForm
               agentName={agent?.name ?? id}
               generating={generating}
+              error={generationError}
               disabled={editActive || !agent}
-              onCreate={(from, to) => { if (agent) void appStore.generate(from, to, agent.id); }}
+              onCreate={() => { if (agent) void appStore.generateAutonomous(agent.id); }}
             />
             <button
               className="btn danger detail-clear"
@@ -338,61 +355,74 @@ export default function AgentDetailPage() {
         </aside>
       </div>
 
-      {/* Delete confirmation — permanent, global removal. */}
+      {/* Canvas visibility changes never delete archived artworks. */}
       {confirmStroke && (
-        <div className="modal-overlay" onClick={() => setConfirmDeleteId(null)}>
+        <div className="modal-overlay" onClick={() => { if (!mutating) setConfirmDeleteId(null); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Delete stroke?</h3>
-            <p className="modal-body">Are you sure you want to delete this stroke?</p>
+            <h3 className="modal-title">Remove from canvas?</h3>
+            <p className="modal-body">This only hides the stroke from your canvas. Its original stays saved in the Archive and can be restored.</p>
             <p className="modal-target">
               <b>{confirmStroke.from}</b> → <b>{confirmStroke.to}</b>
             </p>
+            <StorageNotice />
             <div className="modal-actions">
-              <button className="mini" onClick={() => setConfirmDeleteId(null)}>Cancel</button>
-              <button className="mini reject danger" onClick={onConfirmDelete}>Delete</button>
+              <button className="mini" disabled={mutating} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+              <button className="mini reject danger" disabled={mutating} onClick={onConfirmDelete}>{mutating ? "Removing…" : "Remove from canvas"}</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Delete-agent confirmation — server removal (+ stroke cascade), then home. */}
+      {/* Agent pool membership never cascades to artwork deletion. */}
       {confirmDeleteAgent && (
-        <div className="modal-overlay" onClick={() => setConfirmDeleteAgent(false)}>
+        <div className="modal-overlay" onClick={() => { if (!mutating) setConfirmDeleteAgent(false); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Delete agent?</h3>
+            <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
-              This removes <b>{agent?.name ?? id}</b>{agent ? ` (${agent.occupation})` : ""} and all of
-              its strokes. This cannot be undone.
+              This removes <b>{agent?.name ?? id}</b>{agent ? ` (${agent.occupation})` : ""} from your available pool.
+              All artworks stay on your canvas and in the Archive. You can attract this agent again later.
             </p>
+            <StorageNotice />
             <div className="modal-actions">
-              <button className="mini" onClick={() => setConfirmDeleteAgent(false)}>Cancel</button>
+              <button className="mini" disabled={mutating} onClick={() => setConfirmDeleteAgent(false)}>Cancel</button>
               <button
                 className="mini reject danger"
-                onClick={() => { void appStore.deleteAgent(id); setConfirmDeleteAgent(false); router.push("/"); }}
+                disabled={mutating}
+                onClick={async () => {
+                  setMutating(true);
+                  try { if (await appStore.deleteAgent(id)) { setConfirmDeleteAgent(false); router.push("/studio"); } }
+                  finally { setMutating(false); }
+                }}
               >
-                Delete
+                {mutating ? "Removing…" : "Remove agent"}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Clear-canvas confirmation — wipes EVERY stroke from the canvas. */}
+      {/* Clear only this visitor's canvas; saved artwork is retained. */}
       {confirmClear && (
-        <div className="modal-overlay" onClick={() => setConfirmClear(false)}>
+        <div className="modal-overlay" onClick={() => { if (!mutating) setConfirmClear(false); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <h3 className="modal-title">Clear canvas?</h3>
             <p className="modal-body">
-              This permanently removes all <b>{strokes.length}</b> stroke{strokes.length === 1 ? "" : "s"} from
-              the canvas. This cannot be undone.
+              This hides all <b>{strokes.length}</b> stroke{strokes.length === 1 ? "" : "s"} from
+              your Snapshot and Sky canvases. All artworks stay in the <Link href="/archive">Archive</Link> and can be restored. Other visitors are not affected.
             </p>
+            <StorageNotice />
             <div className="modal-actions">
-              <button className="mini" onClick={() => setConfirmClear(false)}>Cancel</button>
+              <button className="mini" disabled={mutating} onClick={() => setConfirmClear(false)}>Cancel</button>
               <button
                 className="mini reject danger"
-                onClick={() => { void appStore.clear(); setConfirmClear(false); }}
+                disabled={mutating}
+                onClick={async () => {
+                  setMutating(true);
+                  try { if (await appStore.clear()) { setConfirmClear(false); setEditActive(false); setSelectedStrokeId(null); setPreviewStrokeId(null); setTransforms({}); } }
+                  finally { setMutating(false); }
+                }}
               >
-                Clear canvas
+                {mutating ? "Clearing…" : "Clear canvas"}
               </button>
             </div>
           </div>

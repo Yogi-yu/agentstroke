@@ -5,7 +5,7 @@ const load = createTypeScriptLoader();
 const { isSameOriginRequest } = load("lib/requestOrigin.ts");
 
 function request({ url = "http://127.0.0.1:3000/api/skyBatch", origin, host, site, forwardedHost } = {}) {
-  const headers = { "Content-Type": "application/json" };
+  const headers = { "Content-Type": "application/json", cookie: `noema_visitor=${"a".repeat(64)}` };
   if (origin !== undefined) headers.origin = origin;
   if (host !== undefined) headers.host = host;
   if (site !== undefined) headers["sec-fetch-site"] = site;
@@ -85,7 +85,10 @@ function guardedRoute() {
   const calls = { generator: 0, state: 0, store: 0, provider: 0 };
   const forbidden = (type) => () => { calls[type]++; throw new Error(`Unexpected ${type} access from an invalid request`); };
   load("lib/strokegen.ts").generateStroke = forbidden("generator");
-  load("lib/skyBatchStore.ts").skyBatchState = forbidden("state");
+  const batches = load("lib/skyBatchStore.ts");
+  batches.readSkyBatch = forbidden("state");
+  batches.readSkySnapshot = forbidden("state");
+  batches.claimSkyBatch = forbidden("state");
   const store = load("lib/store.ts");
   store.listAgents = forbidden("store");
   store.listStrokes = forbidden("store");
@@ -125,7 +128,7 @@ test("real route rejects unsafe origins with 403 before parsing or touching stat
     value.json = () => { throw new Error("Unsafe origin must be rejected before reading its body"); };
     const response = await route.POST(value);
     assert.equal(response.status, 403, JSON.stringify(options));
-    assert.equal((await response.json()).error, "Generation must be requested from this site.");
+    assert.equal((await response.json()).error, "This action must be requested from this site.");
   }
   assert.deepEqual(calls, { generator: 0, state: 0, store: 0, provider: 0 });
   assert.equal(globalThis.__noemaSkyBatches, undefined, "Rejected origins must not initialize batch state");

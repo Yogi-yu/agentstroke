@@ -1,4 +1,9 @@
-export type CanvasDisplayMode = "animated" | "static";
+export type CanvasDisplayMode = "animated" | "static" | "sphere";
+
+/** Browser preferences affect presentation only, never the stored artwork. */
+export function readCanvasDisplayMode(value: unknown): CanvasDisplayMode {
+  return value === "static" || value === "sphere" ? value : "animated";
+}
 
 /** Static means the complete artwork, not a pause at an arbitrary frame. */
 export function canvasPresentation({

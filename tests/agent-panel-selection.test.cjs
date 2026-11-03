@@ -48,6 +48,7 @@ function panelHarness() {
   const localRequire = (name) => {
     if (name === "react") return hooks;
     if (name === "next/link") return { default: "a" };
+    if (name === "@/components/StorageNotice") return { default: () => null };
     if (name === "@/state/appStore") return { useApp: () => snapshot, appStore: {} };
     if (name === "@/lib/agents") return { categoryHue: () => 200, categoryLabel: (value) => value };
     if (name.startsWith("@/")) return load(name.slice(2) + ".ts");

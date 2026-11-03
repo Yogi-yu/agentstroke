@@ -8,11 +8,11 @@ function generator(create, model) {
   const agent = load("lib/agents.ts").makeAgents()[0];
   if (model) agent.model = model;
   const generate = load("lib/strokegen.ts").generateStroke;
-  return { agent, run: (options = {}) => generate(agent, "chaos", "order", 1000, undefined, { requireModel: true, ...options }) };
+  return { agent, generate, run: (options = {}, previous) => generate(agent, "ignored website source", "ignored website target", 1000, previous, { requireModel: true, ...options }) };
 }
 const valid = { steps: [
   { anchor: "chaos", entropy: .8, confidence: .4 },
-  { anchor: "emergent symmetry", entropy: .5, confidence: .6 },
+  { anchor: "symmetry", entropy: .5, confidence: .6 },
   { anchor: "order", entropy: .2, confidence: .9 },
 ] };
 const reply = (value = valid, finish_reason = "stop") => ({ choices: [{ finish_reason, message: { content: JSON.stringify(value) } }] });
@@ -44,24 +44,34 @@ test("valid request uses English row schema, abortable 25s and zero SDK retries"
   assert.equal(options.maxRetries, 0);
   assert.equal(options.timeout, 25000);
   assert.ok(options.signal instanceof AbortSignal);
-  assert.equal(body.max_tokens, 1600);
+  assert.equal(body.max_tokens, 6144);
   assert.deepEqual(body.response_format, { type: "json_object" });
   assert.equal(body.model, instance.agent.model);
   assert.ok(body.messages[0].content.includes('"steps"'));
-  assert.ok(body.messages[0].content.includes("short English concept"));
+  assert.match(body.messages[0].content, /exactly one English word/);
+  assert.match(body.messages[0].content, /Do not concatenate a phrase/);
   assert.equal(body.reasoning, undefined);
   assert.equal(stroke.agent_id, instance.agent.id);
   assert.equal(stroke.points[0].anchor, "chaos");
   assert.equal(stroke.points.at(-1).anchor, "order");
-  // Mood resampling may repeat model anchors, but never invent CONCEPT_BANK detours.
-  const modelAnchors = new Set(valid.steps.map((step) => step.anchor));
-  assert.ok(stroke.points.every((point) => modelAnchors.has(point.anchor)));
+  assert.equal(stroke.generation_mode, "autonomous");
+  assert.equal(stroke.semantic_depth, valid.steps.length);
+  assert.deepEqual(stroke.points.map(({ anchor, entropy, confidence }) => ({ anchor, entropy, confidence })), valid.steps);
+  assert.ok(body.messages[0].content.includes("Freely choose your own starting concept"));
+  assert.doesNotMatch(JSON.stringify(body.messages), /ignored website|Return 9 ordered steps/);
+  for (const message of body.messages) assert.doesNotMatch(message.content, /"wu"|"you"|fixed wu/);
+  const identity = JSON.parse(body.messages[1].content.split("\n")[0].slice("Agent identity data: ".length));
+  assert.equal(identity.name, instance.agent.name);
+  assert.equal(identity.category, instance.agent.category);
+  assert.equal(identity.economic_function, instance.agent.economic_function);
+  assert.equal(identity.task_domain, instance.agent.task_domain);
+  assert.equal(typeof identity.creative_disposition, "string");
 });
 
 test("legacy parallel arrays and numeric strings succeed without another request", async () => {
   let calls = 0;
   await generator(async () => { calls++; return reply({
-    anchors: ["chaos", "emergent symmetry", "order"],
+    anchors: ["chaos", "symmetry", "order"],
     entropy_profile: [".8", "5e-1", "0.2"], confidence_profile: [".4", ".6", ".9"],
   }); }).run();
   assert.equal(calls, 1);
@@ -75,11 +85,45 @@ test("malformed output is repaired once by the same real model, never patched lo
   assert.deepEqual(attempts, [1, 2]);
   assert.equal(calls.length, 2);
   assert.equal(calls[1][0].model, calls[0][0].model);
-  assert.equal(calls[1][0].max_tokens, 2400);
+  assert.equal(calls[1][0].max_tokens, 8192);
   assert.equal(calls[1][1].timeout, 30000);
   assert.equal(calls[1][1].maxRetries, 0);
   assert.match(calls[1][0].messages[1].content, /failed validation \(invalid_response\)/);
   assert.match(calls[1][0].messages[1].content, /Previous response data:/);
+});
+
+test("phrase anchors require a fresh model-authored single-word repair, never local truncation", async () => {
+  const calls = [];
+  const phrasePath = { steps: [
+    { anchor: "raw market noise", entropy: .9, confidence: .2 },
+    { anchor: "a quiet ending", entropy: .4, confidence: .8 },
+  ] };
+  const repaired = { steps: [
+    { anchor: "signal", entropy: .82, confidence: .32 },
+    { anchor: "resonance", entropy: .55, confidence: .64 },
+    { anchor: "silence", entropy: .31, confidence: .91 },
+  ] };
+  const stroke = await generator(async (body) => {
+    calls.push(body);
+    return reply(calls.length === 1 ? phrasePath : repaired);
+  }).run();
+  assert.equal(calls.length, 2);
+  const correction = calls[1].messages[1].content;
+  assert.match(correction, /Single-word correction/);
+  assert.match(correction, /do not mechanically split, concatenate, or trim the phrase/);
+  assert.ok(correction.indexOf("Single-word correction") > correction.indexOf("Previous response data:"));
+  assert.deepEqual(stroke.points.map(({ anchor, entropy, confidence }) => ({ anchor, entropy, confidence })), repaired.steps);
+  assert.equal(stroke.from, "signal");
+  assert.equal(stroke.to, "silence");
+  assert.equal(stroke.semantic_depth, 3);
+  assert.ok(!stroke.points.some(point => ["raw", "market", "noise", "quiet", "ending"].includes(point.anchor)));
+});
+
+test("repeated phrase output stops after two attempts without fabricating a stroke", async () => {
+  let calls = 0;
+  const phrases = { steps: valid.steps.map((step, index) => index === 1 ? { ...step, anchor: "emergent symmetry" } : step) };
+  await assert.rejects(generator(async () => { calls++; return reply(phrases); }).run(), isError("invalid_response", true, 2));
+  assert.equal(calls, 2);
 });
 
 test("Gemini retains its model with bounded reasoning and visible-output room", async () => {
@@ -90,7 +134,7 @@ test("Gemini retains its model with bounded reasoning and visible-output room", 
   }, "google/gemini-2.5-pro").run();
   assert.equal(calls.length, 2);
   assert.deepEqual(calls.map(([body]) => body.model), ["google/gemini-2.5-pro", "google/gemini-2.5-pro"]);
-  assert.deepEqual(calls.map(([body]) => body.max_tokens), [2048, 3072]);
+  assert.deepEqual(calls.map(([body]) => body.max_tokens), [6656, 8704]);
   for (const [body] of calls) assert.deepEqual(body.reasoning, { max_tokens: 512, exclude: true });
   assert.match(calls[1][0].messages[1].content, /failed validation \(truncated\)/);
 });
@@ -144,18 +188,105 @@ test("permanent errors/refusals never retry or expose provider text", async () =
   }
 });
 
-test("invalid scalar/unknown/missing/endpoint fields reject after exactly two requests", async () => {
+test("invalid scalar/unknown/missing fields reject after exactly two requests", async () => {
   for (const value of [
     { path: [] },
     { path: ["chaos", "order"], entropy: [.5], confidence: [.5, .7] },
     { steps: valid.steps.map((step, i) => i === 1 ? { ...step, confidence: 1.1 } : step) },
     { steps: valid.steps.map((step, i) => i === 1 ? { ...step, extra: "invented" } : step) },
-    { steps: valid.steps.map((step, i) => i === 0 ? { ...step, anchor: "different source" } : step) },
+    { steps: valid.steps.map((step, i) => i === 0 ? { ...step, anchor: "" } : step) },
   ]) {
     let calls = 0;
     await assert.rejects(generator(async () => { calls++; return reply(value); }).run(), isError("invalid_response", true, 2));
     assert.equal(calls, 2);
   }
+});
+
+test("default autonomous generation preserves freely chosen endpoints, loops and every step", async () => {
+  const steps = [
+    { anchor: "station", entropy: .91, confidence: .24 },
+    { anchor: "timetable", entropy: .57, confidence: .52 },
+    { anchor: "station", entropy: .64, confidence: .7 },
+    { anchor: "invitation", entropy: .39, confidence: .82 },
+  ];
+  const instance = generator(async () => reply({ steps }));
+  const previous = await instance.run();
+  const stroke = await instance.run({}, previous);
+  assert.equal(stroke.from, steps[0].anchor);
+  assert.equal(stroke.to, steps.at(-1).anchor);
+  assert.equal(stroke.semantic_depth, 4);
+  assert.deepEqual(stroke.points.map(({ anchor, entropy, confidence }) => ({ anchor, entropy, confidence })), steps);
+  assert.equal(stroke.points.length, previous.points.length, "Visual contrast must not force a new semantic depth");
+  assert.equal(stroke.generation_mode, "autonomous");
+});
+
+test("short and long agent-authored paths are never padded, downsampled or replaced", async () => {
+  for (const count of [2, 3, 7, 13, 32, 64]) {
+    const steps = Array.from({ length: count }, (_, i) => ({
+      anchor: ["origin", "echo", "threshold", "return"][i % 4], entropy: i / (count - 1), confidence: 1 - i / (count - 1),
+    }));
+    const instance = generator(async () => reply({ steps }));
+    const previous = await instance.run();
+    const stroke = await instance.run({}, previous);
+    assert.equal(stroke.points.length, count);
+    assert.equal(stroke.semantic_depth, count);
+    assert.deepEqual(stroke.points.map(({ anchor, entropy, confidence }) => ({ anchor, entropy, confidence })), steps);
+  }
+});
+
+test("only the labelled example fixes wu → you; its full middle remains model-authored", async () => {
+  const calls = [];
+  const steps = [
+    { anchor: "wu", entropy: .8, confidence: .4 },
+    { anchor: "threshold", entropy: .6, confidence: .5 },
+    { anchor: "you", entropy: .2, confidence: .9 },
+  ];
+  const stroke = await generator(async (body) => { calls.push(body); return reply({ steps }); }).run({ mode: "example" });
+  assert.equal(stroke.generation_mode, "example");
+  assert.equal(stroke.from, "wu");
+  assert.equal(stroke.to, "you");
+  assert.deepEqual(stroke.points.map(({ anchor, entropy, confidence }) => ({ anchor, entropy, confidence })), steps);
+  for (const message of calls[0].messages) {
+    assert.match(message.content, /first step must have anchor exactly "wu"/);
+    assert.match(message.content, /last step must have anchor exactly "you"/);
+    assert.doesNotMatch(message.content, /Freely choose your own starting|no supplied destination|You decide its course/);
+  }
+  assert.match(calls[0].messages[0].content, /intermediate wandering and its step count/);
+  assert.match(calls[0].messages[0].content, /endpoint tokens "wu" and "you" unchanged/);
+  assert.doesNotMatch(JSON.stringify(calls[0].messages), /ignored website/);
+  await assert.rejects(generator(async () => reply()).run({ mode: "example" }), isError("invalid_response", true, 2));
+});
+
+test("example repair repeats mandatory endpoints after invalid provider data without rewriting it locally", async () => {
+  const calls = [];
+  const steps = [
+    { anchor: "wu", entropy: .8, confidence: .4 },
+    { anchor: "threshold", entropy: .5, confidence: .6 },
+    { anchor: "you", entropy: .2, confidence: .9 },
+  ];
+  const wrong = { steps: [
+    { anchor: "innovation", entropy: .8, confidence: .4 },
+    { anchor: "completion", entropy: .2, confidence: .9 },
+  ] };
+  const stroke = await generator(async (body) => {
+    calls.push(body);
+    return reply(calls.length === 1 ? wrong : { steps });
+  }).run({ mode: "example" });
+  assert.equal(calls.length, 2);
+  const correction = calls[1].messages[1].content;
+  assert.match(correction, /Required correction for this example: The first step must have anchor exactly "wu"/);
+  assert.match(correction, /last step must have anchor exactly "you"/);
+  assert.match(correction, /any other concept is invalid/);
+  assert.ok(correction.indexOf("Required correction") > correction.indexOf("Previous response data"));
+  assert.deepEqual(stroke.points.map(({ anchor, entropy, confidence }) => ({ anchor, entropy, confidence })), steps);
+});
+
+test("legacy requireModel false cannot enable synthetic artwork or a prescribed path", async () => {
+  await assert.rejects(generator(null).run({ requireModel: false }), isError("configuration", false, 0));
+  await assert.rejects(generator(null).run({ mode: "example", requireModel: false }), isError("configuration", false, 0));
+  const stroke = await generator(async () => reply()).run({ requireModel: false });
+  assert.equal(stroke.generation_mode, "autonomous");
+  assert.deepEqual(stroke.points.map((point) => point.anchor), valid.steps.map((point) => point.anchor));
 });
 
 test("request deadlines abort real SDK signals at 25s and 30s; no hidden third request", async (t) => {

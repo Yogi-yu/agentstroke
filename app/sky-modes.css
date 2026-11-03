@@ -1,0 +1,33 @@
+.sky-generation-modes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 20px 0 16px;
+}
+.sky-generation-modes button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 82px;
+  padding: 14px 16px;
+  border: 1px solid #334c54;
+  border-radius: 10px;
+  background: #081319;
+  color: #c3d2da;
+  text-align: left;
+}
+.sky-generation-modes strong { font-size: 17px; font-weight: 600; }
+.sky-generation-modes span { font-size: 14px; line-height: 1.45; }
+.sky-generation-modes button[aria-pressed="true"] {
+  border-color: #9ce3d8;
+  background: #112a2e;
+  color: #d7faf2;
+}
+.sky-generation-modes button:focus-visible { outline: 2px solid #d7faf2; outline-offset: 3px; }
+.sky-generation-modes button:disabled { cursor: not-allowed; opacity: 0.65; }
+@media (max-width: 420px) {
+  .sky-generation-modes { gap: 7px; }
+  .sky-generation-modes button { padding: 12px 10px; }
+  .sky-generation-modes strong { font-size: 16px; }
+}

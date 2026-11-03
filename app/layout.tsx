@@ -2,6 +2,10 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import "./globals.css";
 import "./noema.css";
+import "./sphere-controls.css";
+import "./sphere-view.css";
+import "./canvas-playback-controls.css";
+import "./sky-modes.css";
 
 const description =
   "Noema explores how autonomous agents might create, value, collect, and form consensus around machine-native cultural artifacts.";

@@ -1,214 +1,237 @@
-// ============================================================================
-// Server-side store — SINGLE SOURCE OF TRUTH for agents + strokes.
-// ----------------------------------------------------------------------------
-// Process-wide globalThis singleton so the agent pool + generated strokes
-// persist across route invocations and page refreshes. The frontend is NEVER
-// the source of truth: it fetches this on load and re-syncs after every change.
-//
-//   roster — the immutable catalog of candidate economic agents (attraction src)
-//   pool   — the AVAILABLE agents (server-authoritative). Starts with the release snapshot;
-//            grows as a posted task attracts more; shrinks on delete.
-// ============================================================================
-
+import { createHash, randomInt } from "node:crypto";
 import type { AgentProfile, StrokeTransform, TransitionPath } from "@/lib/types";
 import { makeAgents } from "@/lib/agents";
-import { clearSkyBatches } from "@/lib/skyBatchStore";
 import { createPublishedCanvas } from "@/lib/publishedCanvas";
+import { assignBrushTreatment, brushTreatmentForIndex } from "@/engine/brushAssignment";
+import { databaseTransaction, type DatabaseClient } from "@/lib/database";
+import type { SkyBatch } from "@/lib/skyBatch";
 
-const MAX_STROKES = 500; // ring-buffer cap to bound memory
+export const PUBLIC_ARTWORK_OWNER = "public";
+interface AgentState { pool: AgentProfile[]; lastOut: Record<string, number> }
+export interface VisitorRow { owner_id: string; agents_json: string; revision: number; brush_sequence: number; latest_sky_request: string | null }
+interface ArtworkRow { id: string; owner_id: string; payload: string; transform_json?: string | null; hidden?: number }
+const catalog = makeAgents();
+const published = createPublishedCanvas();
 
-interface State {
-  roster: AgentProfile[]; // full catalog (candidates to attract from)
-  pool: AgentProfile[]; // available agents — the persistent, authoritative list
-  strokes: TransitionPath[];
-  /** When each absent agent left the pool (or system start) — drives idle weighting. */
-  lastOut: Record<string, number>;
+function assertOwner(owner: string): void {
+  if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error("A server-resolved visitor identity is required.");
+}
+function agentState(row: VisitorRow): AgentState { return JSON.parse(row.agents_json) as AgentState; }
+function pathFromRow(row: ArtworkRow): TransitionPath {
+  const path = JSON.parse(row.payload) as TransitionPath;
+  if (row.transform_json) path.transform = JSON.parse(row.transform_json) as StrokeTransform;
+  return path;
 }
 
-const g = globalThis as unknown as { __strokeState?: State };
-
-function state(): State {
-  if (!g.__strokeState) {
-    const roster = makeAgents();
-    const now = Date.now();
-    // Seed once per process, preserving original author identities, timestamps,
-    // geometry, signatures and any saved edit transforms. An existing singleton
-    // (including a deliberately cleared one) is never replaced on hot reload.
-    const published = createPublishedCanvas();
-    const pool = published.agents;
-    const present = new Set(pool.map((agent) => agent.id));
-    // every not-yet-present agent has been "out" since start (idle accrues).
-    const lastOut: Record<string, number> = {};
-    for (const agent of roster) if (!present.has(agent.id)) lastOut[agent.id] = now;
-    g.__strokeState = { roster, pool, strokes: published.strokes, lastOut };
-  }
-  return g.__strokeState;
-}
-
-/** High-entropy [0,1) — crypto-safe where available, else Math.random fallback. */
-function cryptoRandom(): number {
-  try {
-    const buf = new Uint32Array(1);
-    (globalThis.crypto as Crypto).getRandomValues(buf);
-    return buf[0] / 4294967296;
-  } catch {
-    return Math.random();
-  }
-}
-
-// ---- agents (server-authoritative pool) ------------------------------------
-
-/** The available agent pool (what /api/agents returns + the UI mirrors). */
-export function listAgents(): AgentProfile[] {
-  return state().pool;
-}
-
-/** Total catalog size — the ceiling on how many agents can be attracted. */
-export function agentCapacity(): number {
-  return state().roster.length;
-}
-
-/** Resolve any agent (pool first, then the wider catalog) for name/style/chat. */
-export function getAgent(id: string): AgentProfile | undefined {
-  const s = state();
-  return s.pool.find((a) => a.id === id) ?? s.roster.find((a) => a.id === id);
-}
-
-/** Add known catalog participants to the pool without removing existing agents. */
-export function ensureCatalogAgents(ids: readonly string[]): AgentProfile[] {
-  const s = state();
-  const selected = [...new Set(ids)].map((id) => {
-    const agent = s.pool.find((candidate) => candidate.id === id) ?? s.roster.find((candidate) => candidate.id === id);
-    if (!agent) throw new Error(`Unknown catalog agent: ${id}`);
-    return agent;
-  });
+/** A visitor row lock serializes only brief DB operations, never model calls. */
+export async function ensureVisitor(db: DatabaseClient, owner: string): Promise<VisitorRow> {
+  assertOwner(owner);
   const now = Date.now();
-  return selected.map((agent) => {
-    const present = s.pool.find((candidate) => candidate.id === agent.id);
-    if (present) return present;
-    const joined = { ...agent, joined_at: now };
-    s.pool.push(joined);
-    delete s.lastOut[agent.id];
+  const initial: AgentState = { pool: published.agents, lastOut: {} };
+  for (const agent of catalog) if (!initial.pool.some(a => a.id === agent.id)) initial.lastOut[agent.id] = now;
+  const inserted = await db.query(`INSERT INTO noema_visitors(owner_id, agents_json, revision, brush_sequence, created_at, updated_at) VALUES($1,$2,0,0,$3,$3) ON CONFLICT(owner_id) DO NOTHING`, [owner, JSON.stringify(initial), now]);
+  const row = (await db.query<VisitorRow>("SELECT * FROM noema_visitors WHERE owner_id=$1 FOR UPDATE", [owner])).rows[0];
+  if (!row) throw new Error("Visitor storage initialization failed.");
+  if (inserted.rowCount) {
+    for (const stroke of published.strokes) {
+      await archiveArtwork(db, PUBLIC_ARTWORK_OWNER, stroke, "published-example");
+      await db.query(`INSERT INTO noema_canvas(owner_id,artwork_id,hidden,transform_json,added_at) VALUES($1,$2,0,$3,$4) ON CONFLICT(owner_id,artwork_id) DO NOTHING`, [owner, stroke.id, stroke.transform ? JSON.stringify(stroke.transform) : null, now]);
+    }
+  }
+  return row;
+}
+
+/** Canonical author data is append-only. No ordinary API deletes these rows. */
+async function archiveArtwork(db: DatabaseClient, owner: string, stroke: TransitionPath, source: string, author?: AgentProfile): Promise<TransitionPath> {
+  const agent = author ?? published.agents.find(a => a.id === stroke.agent_id) ?? catalog.find(a => a.id === stroke.agent_id);
+  await db.query(`INSERT INTO noema_artworks(id,owner_id,payload,agent_json,created_at,source) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`, [stroke.id, owner, JSON.stringify(stroke), agent ? JSON.stringify(agent) : null, stroke.created_at, source]);
+  const saved = (await db.query<ArtworkRow>("SELECT id,owner_id,payload FROM noema_artworks WHERE id=$1", [stroke.id])).rows[0];
+  if (!saved || (saved.owner_id !== owner && saved.owner_id !== PUBLIC_ARTWORK_OWNER)) throw new Error("Artwork identity collision; existing data was not changed.");
+  return pathFromRow(saved);
+}
+
+export async function saveStrokeInTransaction(db: DatabaseClient, owner: string, stroke: TransitionPath, options: { expectedRevision?: number; visitor?: VisitorRow; author?: AgentProfile } = {}): Promise<TransitionPath> {
+  const visitor = options.visitor ?? await ensureVisitor(db, owner);
+  const existing = (await db.query<ArtworkRow>("SELECT id,owner_id,payload FROM noema_artworks WHERE id=$1", [stroke.id])).rows[0];
+  const work = structuredClone(stroke);
+  if (!existing && !work.brush_treatment) {
+    assignBrushTreatment(work, brushTreatmentForIndex(Number(visitor.brush_sequence)));
+    visitor.brush_sequence = Number(visitor.brush_sequence) + 1;
+    await db.query("UPDATE noema_visitors SET brush_sequence=$2,updated_at=$3 WHERE owner_id=$1", [owner, visitor.brush_sequence, Date.now()]);
+  }
+  const saved = await archiveArtwork(db, owner, work, "agent-generated", options.author ?? agentState(visitor).pool.find(a => a.id === stroke.agent_id));
+  // A clear may hide an in-flight result, but cannot destroy a completed work.
+  if (options.expectedRevision === undefined || Number(visitor.revision) === options.expectedRevision) {
+    await db.query(`INSERT INTO noema_canvas(owner_id,artwork_id,hidden,transform_json,added_at) VALUES($1,$2,0,$3,$4) ON CONFLICT(owner_id,artwork_id) DO NOTHING`, [owner, saved.id, saved.transform ? JSON.stringify(saved.transform) : null, Date.now()]);
+  }
+  return saved;
+}
+
+export async function listAgents(owner: string): Promise<AgentProfile[]> {
+  return databaseTransaction(async db => agentState(await ensureVisitor(db, owner)).pool);
+}
+export function agentCapacity(): number { return catalog.length; }
+export async function getAgent(owner: string, id: string): Promise<AgentProfile | undefined> {
+  return (await listAgents(owner)).find(a => a.id === id) ?? catalog.find(a => a.id === id);
+}
+export async function ensureCatalogAgents(owner: string, ids: readonly string[]): Promise<AgentProfile[]> {
+  return databaseTransaction(async db => {
+    const row = await ensureVisitor(db, owner); const state = agentState(row);
+    const result = [...new Set(ids)].map(id => {
+      const present = state.pool.find(a => a.id === id); if (present) return present;
+      const found = catalog.find(a => a.id === id); if (!found) throw new Error(`Unknown catalog agent: ${id}`);
+      const joined = { ...found, joined_at: Date.now() }; state.pool.push(joined); delete state.lastOut[id]; return joined;
+    });
+    await db.query("UPDATE noema_visitors SET agents_json=$2,updated_at=$3 WHERE owner_id=$1", [owner, JSON.stringify(state), Date.now()]);
+    return result;
+  });
+}
+export async function attractAgent(owner: string): Promise<AgentProfile | undefined> {
+  return databaseTransaction(async db => {
+    const row = await ensureVisitor(db, owner); const state = agentState(row);
+    const missing = catalog.filter(a => !state.pool.some(p => p.id === a.id));
+    if (!missing.length) return undefined;
+    // Preserve the original stochastic attraction: idle candidates are gently
+    // favored, while high-entropy sampling remains the dominant factor.
+    const now = Date.now();
+    const idles = missing.map(agent => now - (state.lastOut[agent.id] ?? now));
+    const maxIdle = Math.max(1,...idles);
+    let selected = missing[0], bestScore = -Infinity;
+    missing.forEach((agent,index) => {
+      const score = randomInt(4294967296) / 4294967296 * 0.6 + idles[index] / maxIdle * 0.4;
+      if (score > bestScore) { selected = agent; bestScore = score; }
+    });
+    const joined = { ...selected, joined_at: now };
+    state.pool.push(joined); delete state.lastOut[joined.id];
+    await db.query("UPDATE noema_visitors SET agents_json=$2,updated_at=$3 WHERE owner_id=$1", [owner, JSON.stringify(state), Date.now()]);
     return joined;
   });
 }
-
-/**
- * Attract one not-yet-present catalog agent into the pool — STOCHASTIC selection.
- * ----------------------------------------------------------------------------
- * Each candidate is scored with a weighted random:
- *     score = cryptoRandom() * 0.6 + idle_factor * 0.4
- * where idle_factor is how long the candidate has been out of the pool (longer
- * idle → gently favoured). The high-entropy term dominates, so no two dispatches
- * produce the same sequence and iteration order never decides the pick. Returns
- * undefined when the catalog is exhausted.
- */
-export function attractAgent(): AgentProfile | undefined {
-  const s = state();
-  const present = new Set(s.pool.map((a) => a.id));
-  const candidates = s.roster.filter((a) => !present.has(a.id));
-  if (candidates.length === 0) return undefined;
-
-  const now = Date.now();
-  const idles = candidates.map((c) => now - (s.lastOut[c.id] ?? now));
-  const maxIdle = Math.max(1, ...idles);
-
-  let pick = candidates[0];
-  let bestScore = -Infinity;
-  candidates.forEach((c, i) => {
-    const idleFactor = idles[i] / maxIdle; // 0..1
-    const score = cryptoRandom() * 0.6 + idleFactor * 0.4;
-    if (score > bestScore) { bestScore = score; pick = c; }
+export async function removeAgent(owner: string, id: string): Promise<boolean> {
+  return databaseTransaction(async db => {
+    const row = await ensureVisitor(db, owner); const state = agentState(row);
+    if (!state.pool.some(a => a.id === id)) return false;
+    state.pool = state.pool.filter(a => a.id !== id); state.lastOut[id] = Date.now();
+    await db.query("UPDATE noema_visitors SET agents_json=$2,updated_at=$3 WHERE owner_id=$1", [owner, JSON.stringify(state), Date.now()]);
+    // Removing an agent from this visitor's pool never touches its artworks.
+    return true;
   });
-
-  const agent: AgentProfile = { ...pick, joined_at: now };
-  s.pool.push(agent);
-  delete s.lastOut[pick.id]; // it's in the pool now → no longer idle/out
-  return agent;
+}
+export async function clearAgents(owner: string): Promise<number> {
+  return databaseTransaction(async db => {
+    const row = await ensureVisitor(db, owner); const state = agentState(row); const count = state.pool.length;
+    state.pool.forEach(a => { state.lastOut[a.id] = Date.now(); }); state.pool = [];
+    await db.query("UPDATE noema_visitors SET agents_json=$2,updated_at=$3 WHERE owner_id=$1", [owner, JSON.stringify(state), Date.now()]); return count;
+  });
 }
 
-/**
- * Remove an agent from the pool and CASCADE-delete its strokes (no orphans).
- * Returns true if the agent existed.
+export async function readCanvas(owner: string): Promise<{ strokes: TransitionPath[]; canvasRevision: number }> {
+  return databaseTransaction(async db => {
+    const visitor = await ensureVisitor(db, owner);
+    const rows = await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_canvas c JOIN noema_artworks a ON a.id=c.artwork_id WHERE c.owner_id=$1 AND c.hidden=0 ORDER BY a.created_at,a.id`, [owner]);
+    return {strokes:rows.rows.map(pathFromRow),canvasRevision:Number(visitor.revision)};
+  });
+}
+export async function listStrokes(owner: string): Promise<TransitionPath[]> { return (await readCanvas(owner)).strokes; }
+export async function getStroke(owner: string, id: string): Promise<TransitionPath | undefined> {
+  return databaseTransaction(async db => {
+    await ensureVisitor(db, owner);
+    const row = (await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_artworks a LEFT JOIN noema_canvas c ON c.artwork_id=a.id AND c.owner_id=$1 WHERE a.id=$2 AND (a.owner_id=$1 OR a.owner_id=$3)`, [owner, id, PUBLIC_ARTWORK_OWNER])).rows[0];
+    return row ? pathFromRow(row) : undefined;
+  });
+}
+export async function strokesForAgent(owner: string, id: string): Promise<TransitionPath[]> {
+  return (await listStrokes(owner)).filter(p => p.agent_id === id);
+}
+export async function addStroke(owner: string, stroke: TransitionPath, options: { expectedRevision?: number } = {}): Promise<TransitionPath> {
+  return databaseTransaction(db => saveStrokeInTransaction(db, owner, stroke, options));
+}
+export async function canvasRevision(owner: string): Promise<number> {
+  return databaseTransaction(async db => Number((await ensureVisitor(db, owner)).revision));
+}
+export async function removeStroke(owner: string, id: string): Promise<boolean> {
+  return databaseTransaction(async db => { await ensureVisitor(db, owner); return (await db.query("UPDATE noema_canvas SET hidden=1 WHERE owner_id=$1 AND artwork_id=$2 AND hidden=0", [owner, id])).rowCount > 0; });
+}
+export async function updateStrokeTransform(owner: string, id: string, transform: StrokeTransform): Promise<TransitionPath | undefined> {
+  const tr = transform?.translation;
+  if (!tr || ![tr.x,tr.y,transform.rotation,transform.scale].every(Number.isFinite) || transform.scale <= 0 || transform.scale > 100) throw new Error("Invalid canvas transform.");
+  return databaseTransaction(async db => {
+    await ensureVisitor(db, owner);
+    const row = (await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload FROM noema_canvas c JOIN noema_artworks a ON a.id=c.artwork_id WHERE c.owner_id=$1 AND c.artwork_id=$2 AND c.hidden=0`, [owner, id])).rows[0];
+    if (!row) return undefined;
+    await db.query("UPDATE noema_canvas SET transform_json=$3 WHERE owner_id=$1 AND artwork_id=$2", [owner, id, JSON.stringify(transform)]);
+    return { ...pathFromRow(row), transform: structuredClone(transform) };
+  });
+}
+
+/** Clear only this visitor's presentation; artwork and job history stay stored. */
+export async function clearStrokes(owner: string): Promise<number> {
+  return databaseTransaction(async db => {
+    const visitor = await ensureVisitor(db, owner);
+    const changed = await db.query("UPDATE noema_canvas SET hidden=1 WHERE owner_id=$1 AND hidden=0", [owner]);
+    const revision = Number(visitor.revision) + 1;
+    await db.query("UPDATE noema_visitors SET revision=$2,latest_sky_request=NULL,updated_at=$3 WHERE owner_id=$1", [owner, revision, Date.now()]);
+    const jobs = await db.query<{ request_id: string; payload: string }>("SELECT request_id,payload FROM noema_sky_jobs WHERE owner_id=$1 AND status<>'cleared'", [owner]);
+    for (const row of jobs.rows) {
+      const job = JSON.parse(row.payload) as SkyBatch;
+      job.status = "cleared"; job.canvasRevision = revision; job.updatedAt = Date.now(); job.finishedAt ??= job.updatedAt; job.updateSequence = (job.updateSequence ?? 0) + 1;
+      await db.query("UPDATE noema_sky_jobs SET payload=$3,status='cleared',lease_id=NULL,lease_until=0,updated_at=$4 WHERE owner_id=$1 AND request_id=$2", [owner,row.request_id,JSON.stringify(job),Date.now()]);
+    }
+    return changed.rowCount;
+  });
+}
+
+export async function listArchivedStrokes(owner: string, options: { limit?: number; offset?: number } = {}): Promise<{ strokes: TransitionPath[]; total: number; limit: number; offset: number }> {
+  const limit = Number.isFinite(options.limit) ? Math.min(100, Math.max(1, Math.floor(options.limit!))) : 40;
+  const offset = Number.isFinite(options.offset) ? Math.max(0, Math.floor(options.offset!)) : 0;
+  return databaseTransaction(async db => {
+    await ensureVisitor(db, owner);
+    const rows = await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_artworks a LEFT JOIN noema_canvas c ON c.artwork_id=a.id AND c.owner_id=$1 WHERE a.owner_id=$1 OR a.owner_id=$2 ORDER BY a.created_at DESC,a.id DESC LIMIT $3 OFFSET $4`, [owner,PUBLIC_ARTWORK_OWNER,limit,offset]);
+    const total = (await db.query<{ count: number | string }>("SELECT count(*) AS count FROM noema_artworks WHERE owner_id=$1 OR owner_id=$2", [owner,PUBLIC_ARTWORK_OWNER])).rows[0].count;
+    return { strokes: rows.rows.map(pathFromRow), total: Number(total), limit, offset };
+  });
+}
+export async function restoreStroke(owner: string, id: string, options: { expectedRevision?: number } = {}): Promise<TransitionPath | undefined> {
+  return databaseTransaction(async db => {
+    const visitor = await ensureVisitor(db, owner);
+    if (options.expectedRevision !== undefined && Number(visitor.revision) !== options.expectedRevision) return undefined;
+    const row = (await db.query<ArtworkRow>("SELECT id,owner_id,payload FROM noema_artworks WHERE id=$1 AND (owner_id=$2 OR owner_id=$3)", [id,owner,PUBLIC_ARTWORK_OWNER])).rows[0];
+    if (!row) return undefined;
+    const path = pathFromRow(row);
+    await db.query(`INSERT INTO noema_canvas(owner_id,artwork_id,hidden,transform_json,added_at) VALUES($1,$2,0,$3,$4) ON CONFLICT(owner_id,artwork_id) DO UPDATE SET hidden=0`, [owner,id,path.transform ? JSON.stringify(path.transform) : null,Date.now()]);
+    const restored = (await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_canvas c JOIN noema_artworks a ON a.id=c.artwork_id WHERE c.owner_id=$1 AND c.artwork_id=$2`, [owner,id])).rows[0];
+    return pathFromRow(restored);
+  });
+}
+
+/** Administrative migration only; never exposed as a public import API. */
+export async function importArchivedStrokes(strokes: TransitionPath[], options: { source: string; owner?: string; attachToOwner?: string; agents?: AgentProfile[] } ): Promise<number> {
+  return databaseTransaction(async db => {
+    if (options.attachToOwner) await ensureVisitor(db, options.attachToOwner);
+    let count = 0;
+    for (const stroke of strokes) {
+      if (!stroke.id || !Array.isArray(stroke.points)) throw new Error("Invalid artwork import.");
+      const exists = (await db.query("SELECT id FROM noema_artworks WHERE id=$1", [stroke.id])).rowCount;
+      await archiveArtwork(db, options.owner ?? PUBLIC_ARTWORK_OWNER, stroke, options.source, options.agents?.find(a => a.id === stroke.agent_id));
+      if (!exists) count++;
+      if (options.attachToOwner) await db.query(`INSERT INTO noema_canvas(owner_id,artwork_id,hidden,transform_json,added_at) VALUES($1,$2,0,$3,$4) ON CONFLICT(owner_id,artwork_id) DO NOTHING`, [options.attachToOwner,stroke.id,stroke.transform ? JSON.stringify(stroke.transform) : null,Date.now()]);
+    }
+    return count;
+  });
+}
+
+/** Keep the complete pre-migration snapshot, including legacy Sky job metadata.
+ * A raw JSON string preserves its bytes; object input preserves its JSON data.
+ * This has no visitor ownership, does not seed a canvas and is admin-only.
  */
-export function removeAgent(id: string): boolean {
-  const s = state();
-  const i = s.pool.findIndex((a) => a.id === id);
-  if (i === -1) return false;
-  s.pool.splice(i, 1);
-  s.lastOut[id] = Date.now(); // starts accruing idle for future weighting
-  s.strokes = s.strokes.filter((st) => st.agent_id !== id);
-  return true;
-}
-
-/**
- * Remove every currently available agent while preserving historical strokes.
- * The immutable roster remains intact, so creative tasks can attract agents
- * again without destroying artwork provenance.
- */
-export function clearAgents(): number {
-  const s = state();
-  const now = Date.now();
-  const removed = s.pool.length;
-  for (const agent of s.pool) s.lastOut[agent.id] = now;
-  s.pool.length = 0;
-  return removed;
-}
-
-// ---- strokes ---------------------------------------------------------------
-
-export function listStrokes(): TransitionPath[] {
-  return state().strokes;
-}
-
-/** Resolve a single stroke by id (server store = single source of truth). */
-export function getStroke(id: string): TransitionPath | undefined {
-  return state().strokes.find((s) => s.id === id);
-}
-
-export function strokesForAgent(id: string): TransitionPath[] {
-  return state().strokes.filter((s) => s.agent_id === id);
-}
-
-/** Store a generated stroke (de-duped by id, ring-buffered). */
-export function addStroke(stroke: TransitionPath): TransitionPath {
-  const s = state().strokes;
-  if (!s.some((p) => p.id === stroke.id)) {
-    s.push(stroke);
-    if (s.length > MAX_STROKES) s.splice(0, s.length - MAX_STROKES);
-  }
-  return stroke;
-}
-
-/** Remove a single stroke. Returns true if removed. */
-export function removeStroke(id: string): boolean {
-  const s = state().strokes;
-  const i = s.findIndex((p) => p.id === id);
-  if (i === -1) return false;
-  s.splice(i, 1);
-  return true;
-}
-
-/**
- * Persist a stroke's edit-mode transform (move / rotate / scale). Returns the
- * updated stroke, or undefined if the stroke no longer exists. This is the
- * write-back target for Edit Mode — it makes transforms durable across refresh.
- */
-export function updateStrokeTransform(
-  id: string,
-  transform: StrokeTransform,
-): TransitionPath | undefined {
-  const stroke = state().strokes.find((p) => p.id === id);
-  if (!stroke) return undefined;
-  stroke.transform = transform;
-  return stroke;
-}
-
-/** Clear all strokes (canvas reset). Agents persist. */
-export function clearStrokes(): number {
-  const s = state().strokes;
-  const n = s.length;
-  s.length = 0;
-  clearSkyBatches();
-  return n;
+export async function importArchivedSnapshot(snapshot: unknown, options: { source: string }): Promise<{ id: string; inserted: boolean }> {
+  const payload = typeof snapshot === "string" ? snapshot : JSON.stringify(snapshot);
+  if (!payload || !options.source) throw new Error("A snapshot and source are required.");
+  JSON.parse(payload);
+  const contentHash = createHash("sha256").update(payload).digest("hex");
+  const id = createHash("sha256").update(options.source).update("\0").update(payload).digest("hex");
+  return databaseTransaction(async db => {
+    const result = await db.query("INSERT INTO noema_legacy_snapshots(id,source,content_sha256,payload,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(source,content_sha256) DO NOTHING", [id,options.source,contentHash,payload,Date.now()]);
+    return {id,inserted:result.rowCount>0};
+  });
 }

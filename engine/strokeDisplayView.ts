@@ -14,6 +14,7 @@ export function strokeDisplayView(
   transform: StrokeTransform,
   viewport: { width: number; height: number },
   camera: CanvasTransformState,
+  preserveLengthContrast = false,
 ): CanvasTransformState {
   if (points.length < 2 || viewport.width <= 0 || viewport.height <= 0) return camera;
   const center = points.reduce((sum, p) => ({
@@ -30,10 +31,16 @@ export function strokeDisplayView(
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   }
   const extent = Math.max((maxX - minX) * viewport.width, (maxY - minY) * viewport.height);
-  if (!Number.isFinite(extent) || extent < 0.01 || extent >= 120) return camera;
+  const readableExtent = preserveLengthContrast ? 100 : 120;
+  if (!Number.isFinite(extent) || extent < 0.01 || extent >= readableExtent) return camera;
   // A soft floor retains size differences; the 5x cap keeps near-point marks
   // small. Already readable marks and true point gestures are unchanged.
-  const gain = Math.min(5, 0.4 + 72 / extent);
+  // Authored routes retain real length differences: a square-root boost helps
+  // small marks without pressing nearly all of them toward the old 72px floor.
+  // Archived work keeps its original readability behavior and editor identity.
+  const gain = preserveLengthContrast
+    ? Math.min(3, Math.sqrt(readableExtent / extent))
+    : Math.min(5, 0.4 + 72 / extent);
   return {
     scale: camera.scale * gain,
     translateX: camera.translateX + center.x * camera.scale * (1 - gain),

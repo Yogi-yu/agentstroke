@@ -20,7 +20,7 @@ import Link from "next/link";
 import StrokePlayerPanel from "@/components/StrokePlayerPanel";
 import type { AgentProfile, BrushStrokeStyle, StrokeMotionPattern, TransitionPath } from "@/lib/types";
 import { agentRenderStyle, categoryLabel } from "@/lib/agents";
-import { motionStabilityFromDurations, pathLength, resolveVisualSignature, WIDTH_STABILITY_CONSTANT_THRESHOLD, WIDTH_STABILITY_FREQUENT_THRESHOLD } from "@/engine/visualSignature";
+import { agentAuthoredDistance, motionStabilityFromDurations, pathLength, resolveVisualSignature, WIDTH_STABILITY_CONSTANT_THRESHOLD, WIDTH_STABILITY_FREQUENT_THRESHOLD } from "@/engine/visualSignature";
 import { buildMotionPath } from "@/engine/motionPattern";
 import { getStrokePlayback } from "@/engine/strokePlayback";
 import { hashStr } from "@/simulation/rng";
@@ -45,6 +45,7 @@ const MATERIAL_EFFECTS: Record<BrushStrokeStyle, string> = {
   soft: "A pressure-shaped ink belly, compressed dark edge and three connected internal ink channels, ending in a lifted point.",
   watercolor: "A broad wet belly with uneven continuous wet rims and seeded pigment-sediment bands inside the same stroke.",
   texture: "Five clipped, high-contrast longitudinal dry-brush grooves, with seeded changes in groove width and pigment deposition—not scattered particles.",
+  calligraphy: "A matte, loaded brush belly with an asymmetric press-and-lift contour, pointed finish and real unpainted longitudinal dry-bristle channels. The pigment bundles share one continuous spine; no dots or extra branches are added.",
 };
 
 // ---- Layer 3: per-attribute inspector docs --------------------------------
@@ -93,24 +94,24 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
   },
   duration: {
     definition: "The sum of recorded dwell times across the source path; this is input data, not the animation's elapsed time.",
-    geometry: "Total dwell combines with anchor count and intensity to derive the source length value and its short, medium or long category.",
+    geometry: "For agent-authored strokes, dwell does not set length: the agent's actual number of transitions does. Archived strokes retain their original dwell-based length mapping.",
     motion: "Contributes to the meteor's drawing duration together with path intensity. See drawing duration for the actual playback time.",
     ranges: "Shown in milliseconds as the exact sum of the source points' duration_ms values. The separate drawing-duration attribute reports playback seconds.",
-    highLow: "More dwell generally raises the derived length value and slows the reveal, subject to each calculation's limits. It does not add source anchors.",
+    highLow: "More dwell slows the reveal within playback limits. It never adds, removes or replaces an agent-authored anchor.",
   },
   points: {
-    definition: "Number of sampled semantic anchors along the A→B transition.",
-    geometry: "Anchor count contributes to derived length. Principal turns use a remainder rule capped at four, so more anchors do not necessarily mean more visible corners.",
+    definition: "Exact number of anchors returned by the agent, including its chosen starting and ending words. New paths use one English word per anchor; historical paths may contain phrases. Revisits remain in order.",
+    geometry: "A calibrated increasing curve spreads common path lengths across the canvas: 5 / 8 / 12 / 16 anchors target 0.05 / 0.18 / 0.62 / 0.90 canvas units. No resampling or invented detours. Principal turns remain capped at four.",
     motion: "Anchors are grouped into 3–6 equal-distance speed phases. Their dwell times set relative phase speeds; the animation uses a dense sampled centerline rather than revealing one point per frame.",
-    ranges: "Typically 4 – 12 anchors.",
+    ranges: "2–64 anchors: a technical response-size limit, not a requested route length. The agent chooses when its route is complete.",
     highLow: "High → more recorded semantic samples. Low → fewer samples. Visible shape and timing follow the derived attributes rather than the point count alone.",
   },
   intensity: {
-    definition: "Activation magnitude along the path; selects the physical material and contributes to drawing duration.",
-    geometry: "Hard <0.70: clean chisel face. Soft 0.70–0.76: ink belly and compressed edge. Watercolor 0.76–0.83: wet rims and pigment sediment. Texture ≥0.83: five high-contrast dry-brush grooves.",
+    definition: "Activation magnitude along the path; selects the original material family, loads pigment, and contributes to drawing duration. Calligraphy is a separate, persisted platform material assignment.",
+    geometry: "For original materials: hard <0.70, soft 0.70–0.76, watercolor 0.76–0.83, texture ≥0.83. Around 40% of works instead receive a calligraphy brush; local intensity still sets pigment loading within that brush.",
     motion: "Material changes actual contour, leading edge and internal pigment, not only opacity. Local intensity changes pigment loading; higher average intensity shortens duration for the same dwell.",
-    ranges: "0–1. Physical-material thresholds: 0.70, 0.76 and 0.83.",
-    highLow: "Crossing a threshold changes the material. Within each material, pressure, entropy, confidence and seeded structure create further variation.",
+    ranges: "0–1. Original-material thresholds: 0.70, 0.76 and 0.83. Each ten-stroke Sky batch reserves four calligraphy slots, independently of intensity.",
+    highLow: "Crossing a threshold changes an original material. For calligraphy, higher intensity loads the brush more strongly; pressure, entropy and confidence still shape the brush body and dry channels.",
   },
   curvature: {
     definition: "Measured average turning between consecutive source segments; distinct from the signed curvature-bias attribute.",
@@ -141,17 +142,17 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
     highLow: "High → more permitted angular travel or folding within the family. Low → restrained travel. The budget is not an exact count of identical U-turns.",
   },
   line_length: {
-    definition: "A derived source length value, not the literal pixel length of the displayed path.",
-    geometry: "The value chooses a continuous target distance within short, medium or long. The complete family is uniformly scaled and shifted to fit; individual points are never clamped into a border pile.",
+    definition: "Agent-authored route length: each additional semantic transition extends the target travelled distance. No randomly assigned short, medium or long template.",
+    geometry: "Anchor count alone sets target travel using a continuous, increasing contrast curve: 2 / 4 / 6 / 8 / 12 / 16 / 24 / 64 anchors map to 0.014 / 0.03 / 0.07 / 0.18 / 0.62 / 0.90 / 1.02 / 1.12 canvas units, interpolated between those points. No random length or padding is added.",
     motion: "The head travels the resulting centerline. Duration is independent, so a longer distance need not take proportionally more time.",
-    ranges: "Source <5: short, up to 0.112 normalized square-canvas units; 5–6: medium, 0.112–0.56; >6: long, 0.56–1.12. Fitting may reduce the target. Minimum is a point.",
+    ranges: "Agent-authored paths: 2–6 anchors are short, 7–11 medium, 12–64 long, with a distinct continuous distance at every count. Uniform canvas fitting can reduce very wide paths. Individual replay uses a close-up; compare lengths on the shared canvas.",
     highLow: "High → a greater travel-distance allowance. Low → a compact gesture. Source length, generated distance and camera zoom are distinct quantities.",
   },
   line_width: {
     definition: "The source stroke width as a proportion of the square canvas side, interpreted through the selected brush material.",
-    geometry: "Source width, the seeded pressure profile and nib geometry jointly set the swept ribbon's width. Hard nibs also respond to travel direction; soft nibs add a press-and-lift envelope.",
+    geometry: "Source width, the seeded pressure profile and nib geometry jointly set the swept ribbon's width. Hard nibs also respond to travel direction; calligraphy adds an asymmetric loaded belly and a pointed lift-off.",
     motion: "The head is the front edge of this same ribbon. Pressure changes its size and the mark left behind it without spawning separate shapes.",
-    ranges: "Material-response ranges in CSS pixels: hard 0.60–6.40, soft 0.35–12, watercolor 0.65–12, texture 0.55–11.80. A fine connected base is preserved; short pressure phases receive a tighter peak cap to avoid beads. The leading tip and tail can taper narrower.",
+    ranges: "Body widths stay within 12 CSS pixels for all five materials. A fine connected base is preserved; short pressure phases receive a tighter peak cap to avoid beads. The leading tip and tail can taper narrower.",
     highLow: "High source width or pressure → a wider nib and stronger body. Low → finer travel. Material-specific limits keep all strokes readable together.",
   },
   width_variation: {
@@ -170,9 +171,9 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
   },
   brush_head: {
     definition: "The physical material of the moving nib. The head is the front of its ribbon, not a detached dot overlay.",
-    geometry: "Hard: clean 35° chisel face and cut edge. Soft: ink belly, compressed edge and three internal ink channels. Watercolor: wet rims and pigment sediment. Texture: five high-contrast dry-brush grooves clipped within the silhouette.",
-    motion: "Hard/texture ends are oblique; soft lifts to a point; watercolor has a wet leading contour. Entropy, confidence, intensity and pressure vary continuous internal deposition as the same head travels.",
-    ranges: "Intensity <0.70: hard; 0.70–0.76: soft; 0.76–0.83: watercolor; ≥0.83: texture. Primitive-head metadata is provenance, not separate stamps.",
+    geometry: "Calligraphy: matte ink, a loaded asymmetric belly, a pointed finish and open dry-bristle channels. The other materials retain their chisel, soft ink, wet sediment and grooved texture surfaces.",
+    motion: "A calligraphy brush presses, splays and lifts along the same centerline. Entropy and low confidence open dry channels; pressure and intensity consolidate the pigment. No second route or detached brush stamp is created.",
+    ranges: "A persisted platform assignment gives four of every ten Sky strokes the calligraphy material. The remaining strokes use intensity thresholds 0.70, 0.76 and 0.83 for their original material. This choice never changes when filtering or replaying.",
     highLow: "Materials differ in contour, pressure response, pigment and groove structure—not simply opacity. A genuine zero-length gesture remains a compact point.",
   },
   color_system: {
@@ -330,9 +331,11 @@ export default function StrokeDetailPage() {
     return {
       entropy: `Average entropy ${m.entropy.toFixed(2)} contributes ${(m.entropy * 0.62).toFixed(3)} to motion amplitude and permits at most ${crossingBudget} crossings after the ${signature.length_class} length gate. This ${family.toLowerCase()} actually uses ${actualCrossings}; the ceiling does not force loops.`,
       confidence: `Average confidence ${m.confidence.toFixed(2)} contributes ${((1 - m.confidence) * 0.23).toFixed(3)} to movement amplitude. It also helps derive ${(signature.width_ratio * 100).toFixed(2)}% source width and the material's edge coherence; ${signature.color_temperature >= 0 ? "warm" : "cold"} temperature remains source metadata, not the seeded palette.`,
-      duration: `${m.duration}ms of recorded dwell contributes to a ${signature.length.toFixed(2)} source length value (${signature.length_class}). With intensity included, actual playback takes ${timing ? fmtTime(timing.durationMs) : "the derived duration"} at 1×.`,
+      duration: `${m.duration}ms of recorded dwell controls playback timing${stroke?.generation_mode ? "; length is set independently by the agent-authored transition count" : " and contributes to this archived stroke's legacy length"}. With intensity included, actual playback takes ${timing ? fmtTime(timing.durationMs) : "the derived duration"} at 1×.`,
       points: `${m.n} source anchors yield a ${signature.turn_count}-turn budget under the remainder rule and ${signature.speed_profile.length} speed phases. ${family} interprets the budget according to its own geometry; these are semantic anchors, not animation frames.`,
-      intensity: `Average intensity ${m.intensity.toFixed(2)} selects ${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} It also contributes to the ${timing ? fmtTime(timing.durationMs) : "recorded"} reveal duration.`,
+      intensity: signature.brush_style === "calligraphy"
+        ? `This work has a persisted calligraphy assignment from the platform's 40% material mix. Average intensity ${m.intensity.toFixed(2)} controls pigment loading, not that assignment. ${MATERIAL_EFFECTS.calligraphy} Intensity also contributes to the ${timing ? fmtTime(timing.durationMs) : "recorded"} reveal duration.`
+        : `Average intensity ${m.intensity.toFixed(2)} selects ${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} It also contributes to the ${timing ? fmtTime(timing.durationMs) : "recorded"} reveal duration.`,
       curvature: `Measured source curvature ${m.curvature.toFixed(2)} contributes to the ${signature.turn_angle_deg.toFixed(0)}° turn-angle descriptor. The separately derived sharpness ${signature.turn_sharpness.toFixed(2)} controls the meteor's bounded corner rounding.`,
       branching: `The source records branching density ${m.branching.toFixed(2)} and ${signature.brush_heads.join(" + ")} nib metadata. These remain inspectable, while the displayed meteor follows one continuous, unbranched centerline.`,
       stability: `Motion stability ${m.stability.toFixed(3)} falls in the ${m.stability < WIDTH_STABILITY_CONSTANT_THRESHOLD ? "extremely low / constant" : m.stability < WIDTH_STABILITY_FREQUENT_THRESHOLD ? "1–3 transition" : "5–8 transition"} band and selects ${signature.width_change_count} press/lift transition${signature.width_change_count === 1 ? "" : "s"}. ${signature.width_change_count ? "Each transition alternates a 0.15–0.30× valley with a 1.85–2.20× peak." : "Pressure is held at 1×."} Relative phase-speed weights remain ${speedRange}, independently of width.`,
@@ -340,11 +343,11 @@ export default function StrokeDetailPage() {
       motion_amplitude: `${m.entropy.toFixed(2)} × 0.62 + (1 − ${m.confidence.toFixed(2)}) × 0.23 + |${fmtSigned(signature.motion_curvature ?? 0)}| × 0.15 gives amplitude ${(signature.motion_amplitude ?? 0).toFixed(3)}. ${MOTION_EFFECTS[pattern]}`,
       curvature_bias: `Curvature bias ${fmtSigned(signature.motion_curvature ?? 0)} chooses this family's local bend/winding side and contributes ${(Math.abs(signature.motion_curvature ?? 0) * 0.15).toFixed(3)} to amplitude. ${pattern === "arc" ? "Its magnitude also directly widens this arc's sweep." : "It is distinct from the measured source-curvature descriptor."} Global rotation remains ${signature.direction_angle_deg.toFixed(0)}°.`,
       motion_variation: `Motion variation ${m.motionVariation.toFixed(2)} gives a return budget of ${motion?.reversalBudget ?? signature.reversal_count} after the ${signature.length_class} length cap. ${MOTION_EFFECTS[pattern]} It also ${signature.length_class === "long" ? `selects ${signature.color_count} pigments` : "remains color-gated to one pigment"}.`,
-      line_length: `Source length ${signature.length.toFixed(2)} selects ${signature.length_class}. After continuous scaling and boundary fitting, the generated centerline travels ${travelledDistance.toFixed(3)} normalized square-canvas units before corner rounding and camera zoom. It is not a fixed-length template.`,
+      line_length: `${stroke?.generation_mode ? `The agent returned ${m.n} anchors, setting a target of ${agentAuthoredDistance(m.n).toFixed(3)} canvas units on the contrast curve.` : "This archived stroke uses the legacy dwell/depth mapping."} Source length ${signature.length.toFixed(2)} is labelled ${signature.length_class}. After boundary fitting, the centerline travels ${travelledDistance.toFixed(3)} units before corner rounding and camera zoom.`,
       line_width: `The source width is ${(signature.width_ratio * 100).toFixed(2)}% of the canvas side. This source value and pressure profile are remapped through the ${signature.brush_style} nib's geometry, with a maximum body width of 12 CSS pixels across all materials.`,
       width_variation: `${signature.width_change_count === 0 ? "This stroke holds pressure at 1× because its stability is below 0.02; its material still shapes the outline." : `This stroke has ${signature.width_change_count} pronounced press/lift transitions: ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}. Its pressure peak-to-valley contrast is ${(Math.max(...signature.width_profile) / Math.min(...signature.width_profile)).toFixed(1)}:1, smoothly interpolated without mean normalization.`} The centerline is unchanged; physical width stays inside the material's 12-pixel cap.`,
       crossings: `Actual centerline crossings: ${actualCrossings}. Maximum permitted: ${crossingBudget}, derived from entropy ${m.entropy.toFixed(2)} and ${signature.length_class} length. ${family} uses only the intersections natural to its complete route; unused budget does not add loops. Counted before bounded corner rounding.`,
-      brush_head: `${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} The original ${signature.brush_heads.join(" + ")} primitive-head metadata remains inspectable without stamping detached shapes onto the route.`,
+      brush_head: `${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} ${signature.brush_style === "calligraphy" ? "The platform assigned this work to the 40% calligraphy mix; its original agent-authored attributes and route remain unchanged." : "This work retains its intensity-selected original material."} The original ${signature.brush_heads.join(" + ")} primitive-head metadata remains inspectable without stamping detached shapes onto the route.`,
       color_system: `${signature.color_count} seeded-random pigment${signature.color_count === 1 ? " is" : "s are"} used (${hueList}). Stops are equally spaced and interpolated by travelled distance, so refreshes preserve this artwork's palette.`,
       draw_speed: `This meteor travels through ${signature.speed_profile.length} phases with relative speed weights ${signature.speed_profile.map((value) => value.toFixed(2)).join(" → ")}, derived from per-anchor dwell times. Each phase covers an equal share of the route; a larger weight takes less time.`,
       drawing_duration: timing ? `${m.duration}ms of recorded dwell and average intensity ${m.intensity.toFixed(2)} produce a ${fmtTime(timing.durationMs)} reveal at 1×. Playback speed changes the viewing rate; the original timing remains part of this stroke.` : "",
@@ -354,7 +357,7 @@ export default function StrokeDetailPage() {
   }, [m, signature, timing, stroke, motion, travelledDistance]);
 
   const semanticAnchors = useMemo(
-    () => [...new Set((stroke?.points ?? []).map((p) => p.anchor).filter(Boolean))],
+    () => (stroke?.points ?? []).map((p) => p.anchor).filter(Boolean),
     [stroke],
   );
 
@@ -403,11 +406,11 @@ export default function StrokeDetailPage() {
     { input: `entropy (${m.entropy.toFixed(2)})`, effect: "increases lateral amplitude and the permitted crossing ceiling; also affects material dryness" },
     { input: `confidence (${m.confidence.toFixed(2)})`, effect: "restrains lateral movement, consolidates material edges and contributes to source width" },
     { input: `dwell ${m.duration}ms + intensity ${m.intensity.toFixed(2)}`, effect: timing ? `sets a ${fmtTime(timing.durationMs)} reveal at 1×` : "sets the meteor reveal duration" },
-    { input: `path intensity (${m.intensity.toFixed(2)})`, effect: signature ? `selects the ${signature.brush_style} brush material` : "selects the brush material" },
+    { input: `path intensity (${m.intensity.toFixed(2)})`, effect: signature?.brush_style === "calligraphy" ? "loads pigment in the assigned calligraphy brush" : signature ? `selects the ${signature.brush_style} brush material` : "selects the original brush material" },
     { input: `curvature (${m.curvature.toFixed(2)})`, effect: "contributes to the recorded source turn-angle descriptor" },
     { input: `branching density (${m.branching.toFixed(2)})`, effect: "retained as source metadata; the meteor remains one unbranched centerline" },
     ...(signature ? [
-      { input: `depth ${m.n} + dwell ${m.duration}ms`, effect: `derives source length ${signature.length.toFixed(2)}; actual centerline distance ${travelledDistance.toFixed(3)} normalized units` },
+      { input: stroke.generation_mode ? `${m.n - 1} agent-authored transitions` : `depth ${m.n} + dwell ${m.duration}ms`, effect: `derives source length ${signature.length.toFixed(2)}; actual centerline distance ${travelledDistance.toFixed(3)} normalized units` },
       { input: `entropy + (1 − confidence) + |curvature bias|`, effect: `weighted 0.62 / 0.23 / 0.15 → movement amplitude ${(signature.motion_amplitude ?? 0).toFixed(3)}` },
       { input: `intensity + confidence − entropy`, effect: `derives ${(signature.width_ratio * 100).toFixed(2)}% width and ${signature.color_temperature >= 0 ? "warm" : "cold"} temperature` },
       { input: `motion stability ${m.stability.toFixed(2)}`, effect: `creates ${signature.width_change_count} seeded thickness change${signature.width_change_count === 1 ? "" : "s"}: ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}` },
@@ -480,14 +483,14 @@ export default function StrokeDetailPage() {
               <div><dt>crossing budget</dt><dd><b>{motion?.crossingsUsed ?? 0} actual / {motion?.crossingBudget ?? 0} maximum</b> · counts the generated centerline; unused budget never inserts loops</dd></div>
               <div><dt>branching_model</dt><dd><b>{stroke.branching_model ?? "—"}</b> · source semantic metadata; the displayed trajectory remains one unbranched stroke</dd></div>
               <div><dt>motion_model</dt><dd><b>{stroke.motion_model ?? "—"}</b> · contributes to recorded anchor pacing, which becomes the relative phase-speed profile</dd></div>
-              <div><dt>semantic_depth</dt><dd><b>{stroke.semantic_depth ?? "—"}</b> · number of anchors the mood restructured the path to</dd></div>
+              <div><dt>semantic_depth</dt><dd><b>{stroke.semantic_depth ?? "—"}</b> · {stroke.generation_mode ? "exact agent-authored anchor count; no resampling" : "archived semantic depth"}</dd></div>
             </dl>
           </div>
         </section>
 
         {/* 5 · SEMANTIC ANCHORS */}
         <section className="panel sd-section">
-          <div className="panel-head"><h2>Semantic Anchors</h2><span className="muted">key conceptual nodes</span></div>
+          <div className="panel-head"><h2>Semantic Anchors</h2><span className="muted">complete route in order</span></div>
           <div className="sd-block">
             {semanticAnchors.length ? (
               <div className="sd-anchors">

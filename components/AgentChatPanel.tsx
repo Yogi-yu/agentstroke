@@ -3,7 +3,7 @@
 // ============================================================================
 // AgentChatPanel — agent identity chat (restored).
 // ----------------------------------------------------------------------------
-// Talk to an agent about its identity, cognitive style and A→B stroke behavior.
+// Talk to an agent about its identity and independently authored journeys.
 // Quick-question buttons + free text; replies stream into model-labeled bubbles.
 // Not a generic assistant — an identity reflection interface.
 // ============================================================================
@@ -18,7 +18,7 @@ interface Props {
 
 const QUICK_PROMPTS: ReadonlyArray<{ label: string; prompt: string }> = [
   { label: "What is your purpose?", prompt: "What is your purpose?" },
-  { label: "Why did you generate this stroke?", prompt: "Why did you generate this stroke — how does your economic function shape its A→B form?" },
+  { label: "Why did you generate this stroke?", prompt: "Describe your recorded stroke journey and how it relates to your work. Distinguish your own choices from any fixed example; do not invent an unrecorded rationale." },
   { label: "Explain your economic function", prompt: "Explain your economic function and the real-world role you map to." },
   { label: "Describe your working behavior", prompt: "Describe your working behavior and cognitive style." },
 ];
@@ -75,8 +75,8 @@ export default function AgentChatPanel({ agentId, agentName }: Props) {
       <div className="chat-log" ref={scrollRef}>
         {state.messages.length === 0 && (
           <div className="chat-empty">
-            Ask this agent about its identity, cognitive style, or the A→B
-            transitions it prefers.
+            Ask this agent about its identity, the words it chooses, or the
+            journeys it creates.
           </div>
         )}
         {state.messages.map((m) => (

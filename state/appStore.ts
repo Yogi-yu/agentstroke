@@ -2,7 +2,7 @@
 // appStore (client) — agents (identity) + strokes, mirrored from the server.
 // ----------------------------------------------------------------------------
 // Single source of truth for the canvas + panels. Loads the agent roster and
-// persisted strokes from the server, requests A→B stroke generation, and clears
+// persisted strokes from the server, requests autonomous generation, and clears
 // the canvas. (The GPU-side per-stroke geometry lives in state/strokeStore.ts.)
 // ============================================================================
 
@@ -15,6 +15,9 @@ export interface AppSnapshot {
   strokes: TransitionPath[];
   ready: boolean;
   generating: boolean;
+  generationError: string;
+  /** A failed database operation must remain visible until dismissed or retried. */
+  storageError: string;
   /** A creative task is posted — attracting new agents over time. */
   funding: boolean;
   /** Total catalog size (ceiling on attractable agents). remaining = capacity - agents. */
@@ -25,7 +28,7 @@ export interface AppSnapshot {
 }
 
 const EMPTY: AppSnapshot = Object.freeze({
-  agents: [], strokes: [], ready: false, generating: false, funding: false, capacity: 0, resetRevision: 0, clearing: false,
+  agents: [], strokes: [], ready: false, generating: false, generationError: "", storageError: "", funding: false, capacity: 0, resetRevision: 0, clearing: false,
 });
 
 type Listener = () => void;
@@ -35,6 +38,8 @@ class AppStore {
   private strokes: TransitionPath[] = [];
   private ready = false;
   private generating = false;
+  private generationError = "";
+  private storageError = "";
   private funding = false;
   private capacity = 0;
   private canvasRevision: number | null = null;
@@ -48,6 +53,8 @@ class AppStore {
   private cached: AppSnapshot | null = null;
   /** Per-id debounce timers coalescing rapid transform writes (e.g. wheel resize). */
   private persistTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private persistWaiters = new Map<string, Array<(saved: boolean) => void>>();
+  private transformWrites = new Map<string, Promise<boolean>>();
 
   subscribe = (cb: Listener): (() => void) => {
     this.ensureResetSync();
@@ -62,6 +69,8 @@ class AppStore {
         strokes: this.strokes,
         ready: this.ready,
         generating: this.generating,
+        generationError: this.generationError,
+        storageError: this.storageError,
         funding: this.funding,
         capacity: this.capacity,
         resetRevision: this.resetRevision,
@@ -78,6 +87,17 @@ class AppStore {
     this.listeners.forEach((l) => l());
   }
 
+  dismissStorageError(): void {
+    this.storageError = "";
+    this.emit();
+  }
+
+  private storageFailure(message: string): false {
+    this.storageError = message;
+    this.emit();
+    return false;
+  }
+
   private ensureResetSync(): void {
     if (!this.resetSubscription && typeof window !== "undefined") {
       this.resetSubscription = subscribeCanvasReset(({ canvasRevision }) => this.applyReset(canvasRevision));
@@ -87,8 +107,11 @@ class AppStore {
   private invalidateStrokeRequests(): void {
     this.strokeEpoch++;
     this.generating = false;
+    this.generationError = "";
     for (const timer of this.persistTimers.values()) clearTimeout(timer);
     this.persistTimers.clear();
+    for (const waiters of this.persistWaiters.values()) waiters.forEach((resolve) => resolve(false));
+    this.persistWaiters.clear();
   }
 
   private applyReset(revision: number): void {
@@ -100,7 +123,7 @@ class AppStore {
     this.emit();
   }
 
-  /** Authoritative reads may discover a reset performed on another device. */
+  /** Authoritative reads may discover a reset performed in another browser tab. */
   private acceptServerRevision(value: unknown): boolean {
     const revision = canvasRevisionOf(value);
     if (revision === null) return true;
@@ -130,7 +153,7 @@ class AppStore {
         this.strokes = sd.strokes ?? [];
       }
     } catch {
-      /* offline → empty */
+      this.storageFailure("Could not load your saved canvas. Your last known view has been kept. Please reload to retry.");
     }
     this.ready = true;
     this.emit();
@@ -177,54 +200,48 @@ class AppStore {
   async attractAgent(): Promise<boolean> {
     try {
       const r = await fetch("/api/agents", { method: "POST" });
-      if (!r.ok) return false;
+      if (!r.ok) return this.storageFailure("Could not save the new agent. Please try again.");
       const d = await r.json();
       if (Array.isArray(d.agents)) this.agents = d.agents;
       if (typeof d.capacity === "number") this.capacity = d.capacity;
       this.emit();
       return !!d.agent;
     } catch {
-      return false;
+      return this.storageFailure("Could not reach storage to add an agent. Please try again.");
     }
   }
 
   /**
-   * Delete an agent on the server (DELETE /api/agents/:id), then re-sync. The
-   * server cascade-removes the agent's strokes; we mirror that locally so the
-   * canvas + all dependent UI drop it immediately.
+   * Remove an agent from this visitor's available pool. Its artworks and their
+   * original authorship remain on the canvas and in the archive.
    */
-  async deleteAgent(id: string): Promise<void> {
-    let agents: AgentProfile[] | null = null;
-    let capacity: number | null = null;
+  async deleteAgent(id: string): Promise<boolean> {
     try {
       const r = await fetch(`/api/agents/${encodeURIComponent(id)}`, { method: "DELETE" });
-      if (r.ok) {
-        const d = await r.json();
-        if (Array.isArray(d.agents)) agents = d.agents;
-        if (typeof d.capacity === "number") capacity = d.capacity;
-      }
+      if (!r.ok) return this.storageFailure("Could not remove this agent. Your available agents have not changed.");
+      const d = await r.json();
+      this.agents = Array.isArray(d.agents) ? d.agents : this.agents.filter((a) => a.id !== id);
+      if (typeof d.capacity === "number") this.capacity = d.capacity;
+      this.emit();
+      return true;
     } catch {
-      /* fall back to optimistic local removal below */
+      return this.storageFailure("Could not confirm agent removal. Reload to check the saved state before retrying.");
     }
-    this.agents = agents ?? this.agents.filter((a) => a.id !== id);
-    if (capacity !== null) this.capacity = capacity;
-    // cascade: drop this agent's strokes from the local mirror (server already did)
-    this.strokes = this.strokes.filter((s) => s.agent_id !== id);
-    this.emit();
   }
 
   /** Clear the available-agent pool while preserving historical strokes. */
-  async clearAgents(): Promise<void> {
+  async clearAgents(): Promise<boolean> {
     this.stopFunding();
     try {
       const r = await fetch("/api/agents", { method: "DELETE" });
-      if (!r.ok) return;
+      if (!r.ok) return this.storageFailure("Could not clear your available agents. Your pool has not changed.");
       const d = await r.json();
       this.agents = Array.isArray(d.agents) ? d.agents : [];
       if (typeof d.capacity === "number") this.capacity = d.capacity;
       this.emit();
+      return true;
     } catch {
-      /* Preserve the last-known server state when the request fails. */
+      return this.storageFailure("Could not confirm the agent pool update. Reload to check the saved state before retrying.");
     }
   }
 
@@ -234,35 +251,45 @@ class AppStore {
     const epoch = this.strokeEpoch;
     try {
       const sr = await fetch("/api/strokes", { cache: "no-store" });
-      if (!sr.ok) return;
+      if (!sr.ok) { this.storageFailure("Your saved canvas could not be refreshed. The last known view is still displayed."); return; }
       const data = await sr.json();
       if (epoch !== this.strokeEpoch || this.clearing || !this.acceptServerRevision(data.canvasRevision)) return;
       this.strokes = data.strokes ?? this.strokes;
       this.emit();
     } catch {
-      /* keep last-known */
+      this.storageFailure("Storage is unreachable. The last known canvas is still displayed.");
     }
   }
 
-  /** Generate one A→B stroke (optionally by a specific agent) and append it. */
-  async generate(from: string, to: string, agentId?: string): Promise<void> {
+  /** Compatibility entry point: old clients cannot impose endpoints anymore. */
+  async generate(_from: string, _to: string, agentId?: string): Promise<void> {
+    return this.generateAutonomous(agentId);
+  }
+
+  /** The agent chooses both endpoints and its complete, variable-length path. */
+  async generateAutonomous(agentId?: string): Promise<void> {
     this.ensureResetSync();
-    if (!from.trim() || !to.trim() || this.generating || this.clearing) return;
+    if (this.generating || this.clearing) return;
     const epoch = this.strokeEpoch;
     this.generating = true;
+    this.generationError = "";
     this.emit();
     try {
       const r = await fetch("/api/generateStroke", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ from: from.trim(), to: to.trim(), agent_id: agentId, ...(this.canvasRevision !== null ? { canvasRevision: this.canvasRevision } : {}) }),
+        body: JSON.stringify({ mode: "autonomous", agent_id: agentId, ...(this.canvasRevision !== null ? { canvasRevision: this.canvasRevision } : {}) }),
       });
       const d = await r.json();
       if (epoch !== this.strokeEpoch || !this.acceptServerRevision(d.canvasRevision)) return;
       if (r.ok && d.stroke) {
         this.strokes = [...this.strokes, d.stroke as TransitionPath];
         this.emit();
+      } else {
+        this.generationError = typeof d.error === "string" ? d.error : "The agent could not create a stroke. Please try again.";
       }
+    } catch {
+      if (epoch === this.strokeEpoch) this.generationError = "Could not reach the generation service. No local substitute was created. Check the canvas before trying again.";
     } finally {
       if (epoch === this.strokeEpoch) {
         this.generating = false;
@@ -280,55 +307,91 @@ class AppStore {
    * the page's `transforms` mirror is updated synchronously by onTransformCommit,
    * so Save & Exit always reads the latest value even before this fires.
    */
-  persistTransform(id: string, transform: StrokeTransform): void {
-    if (this.clearing) return;
+  persistTransform(id: string, transform: StrokeTransform, immediately = false): Promise<boolean> {
+    if (this.clearing) return Promise.resolve(false);
     const epoch = this.strokeEpoch;
     const prev = this.persistTimers.get(id);
     if (prev) clearTimeout(prev);
-    this.persistTimers.set(
-      id,
-      setTimeout(() => {
-        this.persistTimers.delete(id);
-        if (epoch !== this.strokeEpoch || this.clearing) return;
-        const i = this.strokes.findIndex((s) => s.id === id);
-        if (i === -1) return;
-        this.strokes = this.strokes.map((s) => (s.id === id ? { ...s, transform } : s));
-        this.emit();
-        void this.writeTransform(id, transform);
-      }, 200),
-    );
+    const promise = new Promise<boolean>((resolve) => {
+      this.persistWaiters.set(id, [...(this.persistWaiters.get(id) ?? []), resolve]);
+    });
+    const commit = () => {
+      this.persistTimers.delete(id);
+      const waiters = this.persistWaiters.get(id) ?? [];
+      this.persistWaiters.delete(id);
+      // Serialize writes for a stroke: a slow older PATCH cannot overwrite the
+      // user's newer edit in the database.
+      const previousWrite = this.transformWrites.get(id) ?? Promise.resolve(true);
+      const write = previousWrite.then(async () => {
+        if (epoch !== this.strokeEpoch || this.clearing || !this.strokes.some((s) => s.id === id)) return false;
+        return this.writeTransform(id, transform, epoch);
+      });
+      this.transformWrites.set(id, write);
+      void write.then((saved) => {
+        waiters.forEach((resolve) => resolve(saved));
+        if (this.transformWrites.get(id) === write) this.transformWrites.delete(id);
+      });
+    };
+    if (immediately) commit();
+    else this.persistTimers.set(id, setTimeout(commit, 200));
+    return promise;
   }
 
-  private async writeTransform(id: string, transform: StrokeTransform): Promise<void> {
+  private async writeTransform(id: string, transform: StrokeTransform, epoch: number): Promise<boolean> {
     try {
-      await fetch("/api/strokes", {
+      const response = await fetch("/api/strokes", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ id, transform }),
       });
+      if (!response.ok) return this.storageFailure("The stroke edit could not be saved. Its last saved position and size have been restored.");
+      if (epoch !== this.strokeEpoch || this.clearing) return false;
+      this.strokes = this.strokes.map((s) => s.id === id ? { ...s, transform } : s);
+      this.emit();
+      return true;
     } catch {
-      /* keep optimistic local state */
+      return this.storageFailure("Could not confirm the stroke edit. The last confirmed view is restored; reload to check storage.");
     }
   }
 
   /**
-   * Delete ONE stroke GLOBALLY (Issue 1). Removes it from the client mirror —
-   * which cascades into the GPU store, hitmap, transform store, and render
-   * pipeline on the next setData — and from server persistence so it stays gone.
+   * Hide one stroke from this visitor's canvas after storage acknowledges it.
+   * The original artwork remains recoverable through the archive.
    */
-  async deleteStroke(id: string): Promise<void> {
-    const before = this.strokes;
-    this.strokes = before.filter((s) => s.id !== id);
-    if (this.strokes === before) return;
-    this.emit();
+  async deleteStroke(id: string): Promise<boolean> {
     try {
-      await fetch(`/api/strokes?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      const response = await fetch(`/api/strokes?id=${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!response.ok) return this.storageFailure("Could not remove this stroke from the canvas. It is still displayed.");
+      const data = await response.json();
+      if (data.deleted !== true) return this.storageFailure("Stroke removal was not confirmed. The canvas has not changed.");
+      this.strokes = this.strokes.filter((s) => s.id !== id);
+      this.emit();
+      return true;
     } catch {
-      /* ignore — local removal already applied */
+      return this.storageFailure("Could not confirm stroke removal. Reload to check the saved canvas before retrying.");
     }
   }
 
-  /** Clear all strokes (canvas reset). Agent identities persist. */
+  /** Restore a saved artwork without generating a replacement or changing its identity. */
+  async restoreStroke(id: string): Promise<boolean> {
+    if (this.clearing) return false;
+    const epoch = this.strokeEpoch;
+    try {
+      const response = await fetch("/api/archive", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.stroke) return this.storageFailure("Could not restore this artwork. Please try again.");
+      if (epoch !== this.strokeEpoch || !this.acceptServerRevision(data.canvasRevision)) return false;
+      this.strokes = [...this.strokes.filter((s) => s.id !== data.stroke.id), data.stroke];
+      this.emit();
+      return true;
+    } catch {
+      return this.storageFailure("Could not confirm restoration. Check the canvas before trying again.");
+    }
+  }
+
+  /** Hide all visible strokes for this visitor. The archive and agents persist. */
   async clear(): Promise<boolean> {
     this.ensureResetSync();
     if (this.clearing) return false;
@@ -338,16 +401,16 @@ class AppStore {
     let cleared = false;
     try {
       const response = await fetch("/api/strokes", { method: "DELETE" });
-      if (!response.ok) return false;
+      if (!response.ok) return this.storageFailure("Could not clear your canvas. The saved artworks and last known view have been kept.");
       const data = await response.json();
       const revision = canvasRevisionOf(data.canvasRevision);
-      if (data.cleared !== true || revision === null) return false;
+      if (data.cleared !== true || revision === null) return this.storageFailure("Canvas clearing was not confirmed. Please reload to check the saved view.");
       this.applyReset(revision);
       publishCanvasReset(revision);
       cleared = true;
       return true;
     } catch {
-      return false;
+      return this.storageFailure("Could not confirm canvas clearing. Please reload to check the saved view. Your archived artworks are kept.");
     } finally {
       this.clearing = false;
       this.emit();

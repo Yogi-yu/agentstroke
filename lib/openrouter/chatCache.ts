@@ -1,9 +1,11 @@
 // ============================================================================
 // Agent-chat cache — cost control for repeated questions per agent.
 // ----------------------------------------------------------------------------
-// Key = `${agent_id}:${normalizedQuestion}`. A hit returns the stored reply
-// without a model call. Process-wide globalThis singleton.
+// Keys include the private visitor, agent, question and conversation context.
+// This disposable reply cache is unrelated to permanent artwork storage.
 // ============================================================================
+
+import { createHash } from "node:crypto";
 
 export interface ChatCacheEntry {
   response: string;
@@ -22,8 +24,9 @@ function store(): Map<string, ChatCacheEntry> {
   return g.__agentChatCache;
 }
 
-export function chatCacheKey(agentId: string, question: string): string {
-  return `${agentId}:${question.trim().toLowerCase().replace(/\s+/g, " ")}`;
+export function chatCacheKey(owner: string, agentId: string, question: string, context = ""): string {
+  // Never reuse another visitor's private artwork context or conversation.
+  return createHash("sha256").update(JSON.stringify([owner, agentId, question.trim().toLowerCase().replace(/\s+/g, " "), context])).digest("hex");
 }
 
 export function getCachedChat(key: string): ChatCacheEntry | null {

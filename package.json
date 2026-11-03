@@ -2,6 +2,7 @@
   "name": "noema-platform",
   "version": "0.1.0",
   "private": true,
+  "engines": { "node": ">=22.13.0 <26" },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -14,11 +15,13 @@
     "next": "^16.2.9",
     "openai": "^6.45.0",
     "p5.brush": "^2.2.2",
+    "pg": "^8.23.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
     "@types/node": "22.10.5",
+    "@types/pg": "^8.23.1",
     "@types/react": "19.0.7",
     "@types/react-dom": "19.0.3",
     "typescript": "5.7.3"

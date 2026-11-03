@@ -268,3 +268,138 @@ test("a new stroke at the current revision survives delayed equal or older reset
   assert.equal(h.store.getSnapshot().resetRevision, 1);
   assert.equal(h.calls.length, 1, "Reset notifications do not initiate generation or deletion");
 });
+
+test("autonomous requests never send website-assigned endpoints, including the compatibility entry point", async (t) => {
+  const h = harness(t);
+  await h.seed(5, []);
+  const ownJourney = { ...stroke("own-journey"), from: "lattice", to: "belonging" };
+  h.setFetch(({ url, method, options }) => {
+    assert.equal(url, "/api/generateStroke");
+    assert.equal(method, "POST");
+    assert.deepEqual(JSON.parse(options.body), { mode: "autonomous", agent_id: agent.id, canvasRevision: 5 });
+    return response({ stroke: ownJourney, canvasRevision: 5 });
+  });
+  await h.store.generateAutonomous(agent.id);
+  assert.equal(h.store.getSnapshot().strokes[0].from, "lattice");
+  assert.equal(h.store.getSnapshot().strokes[0].to, "belonging");
+  await h.store.generate("a website hint", "another hint", agent.id);
+  assert.equal(h.calls.length, 2);
+});
+
+test("a rejected model generation is visible and never appends a synthetic stroke", async (t) => {
+  const h = harness(t);
+  await h.seed(5, []);
+  h.setFetch(() => response({ error: "The model timed out. No artwork was generated.", canvasRevision: 5 }, false));
+  await h.store.generateAutonomous(agent.id);
+  assert.equal(h.store.getSnapshot().generationError, "The model timed out. No artwork was generated.");
+  assert.deepEqual(h.store.getSnapshot().strokes, []);
+  assert.equal(h.store.getSnapshot().generating, false);
+  h.setFetch(() => response({ stroke: stroke("next-valid"), canvasRevision: 5 }));
+  await h.store.generateAutonomous(agent.id);
+  assert.equal(h.store.getSnapshot().generationError, "");
+  assert.equal(h.store.getSnapshot().strokes.length, 1);
+});
+
+test("network failures are readable and do not leave creation locked", async (t) => {
+  const h = harness(t);
+  await h.seed(5, []);
+  h.setFetch(() => { throw new Error("Localized browser error"); });
+  await assert.doesNotReject(h.store.generateAutonomous(agent.id));
+  assert.match(h.store.getSnapshot().generationError, /Could not reach the generation service/);
+  assert.deepEqual(h.store.getSnapshot().strokes, []);
+  assert.equal(h.store.getSnapshot().generating, false);
+});
+
+test("failed canvas removal preserves the stroke and surfaces a storage error", async (t) => {
+  const h = harness(t);
+  const existing = stroke("not-deleted");
+  await h.seed(4, [existing]);
+  h.setFetch(() => response({ error: "Storage unavailable" }, false));
+  assert.equal(await h.store.deleteStroke(existing.id), false);
+  assert.deepEqual(h.store.getSnapshot().strokes, [existing]);
+  assert.match(h.store.getSnapshot().storageError, /Could not remove/);
+  h.store.dismissStorageError();
+  assert.equal(h.store.getSnapshot().storageError, "");
+});
+
+test("successful agent removal never removes their artwork", async (t) => {
+  const h = harness(t);
+  const existing = stroke("preserve-provenance");
+  await h.seed(4, [existing]);
+  h.setFetch(() => response({ agents: [], capacity: 10 }));
+  assert.equal(await h.store.deleteAgent(agent.id), true);
+  assert.deepEqual(h.store.getSnapshot().agents, []);
+  assert.deepEqual(h.store.getSnapshot().strokes, [existing]);
+});
+
+test("failed agent mutations retain the saved available pool", async (t) => {
+  const h = harness(t);
+  await h.seed();
+  h.setFetch(() => response({ error: "Database unavailable" }, false));
+  assert.equal(await h.store.deleteAgent(agent.id), false);
+  assert.equal(await h.store.clearAgents(), false);
+  assert.equal(await h.store.attractAgent(), false);
+  assert.deepEqual(h.store.getSnapshot().agents, [agent]);
+  assert.ok(h.store.getSnapshot().storageError);
+});
+
+test("failed transform saves never overwrite the last confirmed transform", async (t) => {
+  const h = harness(t);
+  const original = { translation: { x: 0, y: 0 }, rotation: 0, scale: 1 };
+  const existing = { ...stroke("rollback-edit"), transform: original };
+  await h.seed(4, [existing]);
+  const pending = deferred();
+  h.setFetch(() => pending.promise);
+  const saving = h.store.persistTransform(existing.id, { ...original, scale: 2 }, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.store.getSnapshot().strokes[0].transform, original, "Live gestures must not be recorded as saved before acknowledgement");
+  pending.resolve(response({ error: "Unavailable" }, false));
+  assert.equal(await saving, false);
+  assert.deepEqual(h.store.getSnapshot().strokes[0].transform, original);
+  assert.match(h.store.getSnapshot().storageError, /last saved position/);
+});
+
+test("writes to one stroke are serialized so older edits cannot overwrite newer edits", async (t) => {
+  const h = harness(t);
+  const original = { translation: { x: 0, y: 0 }, rotation: 0, scale: 1 };
+  await h.seed(4, [{ ...stroke("serial-edit"), transform: original }]);
+  const first = deferred();
+  const second = deferred();
+  h.setFetch(() => h.calls.length === 1 ? first.promise : second.promise);
+  const saveFirst = h.store.persistTransform("serial-edit", { ...original, scale: 2 }, true);
+  const saveSecond = h.store.persistTransform("serial-edit", { ...original, scale: 3 }, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.calls.length, 1);
+  first.resolve(response({ updated: true }));
+  assert.equal(await saveFirst, true);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.calls.length, 2);
+  second.resolve(response({ updated: true }));
+  assert.equal(await saveSecond, true);
+  assert.equal(h.store.getSnapshot().strokes[0].transform.scale, 3);
+});
+
+test("archive restoration keeps the original id and never duplicates canvas membership", async (t) => {
+  const h = harness(t);
+  await h.seed(4, []);
+  const archived = stroke("original-artwork-id");
+  h.setFetch(({ url, method, options }) => {
+    assert.equal(url, "/api/archive");
+    assert.equal(method, "POST");
+    assert.deepEqual(JSON.parse(options.body), { id: archived.id });
+    return response({ stroke: archived, canvasRevision: 4 });
+  });
+  assert.equal(await h.store.restoreStroke(archived.id), true);
+  assert.equal(await h.store.restoreStroke(archived.id), true);
+  assert.deepEqual(h.store.getSnapshot().strokes, [archived]);
+});
+
+test("a failed archive restoration leaves the current canvas unchanged", async (t) => {
+  const h = harness(t);
+  await h.seed();
+  const before = h.store.getSnapshot().strokes;
+  h.setFetch(() => response({ error: "Not available to this visitor" }, false));
+  assert.equal(await h.store.restoreStroke("unavailable"), false);
+  assert.deepEqual(h.store.getSnapshot().strokes, before);
+  assert.match(h.store.getSnapshot().storageError, /Could not restore/);
+});

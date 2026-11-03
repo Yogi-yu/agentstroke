@@ -176,7 +176,8 @@ export const MOTION_MODELS: MotionModel[] = [
 export type BrushHeadShape = "round" | "square" | "diamond" | "triangle" | "ring" | "organic";
 export type StrokeColorMode = "monochrome" | "duotone" | "spectrum";
 export type StrokeLengthClass = "short" | "medium" | "long";
-export type BrushStrokeStyle = "hard" | "soft" | "watercolor" | "texture";
+export type BrushStrokeStyle = "hard" | "soft" | "watercolor" | "texture" | "calligraphy";
+export type BrushTreatment = "original" | "calligraphy";
 /** Six complete, continuous centreline grammars selected by geometry_mode. */
 export type StrokeMotionPattern = "glide" | "arc" | "wave" | "fold" | "orbit" | "wander";
 
@@ -204,7 +205,7 @@ export interface StrokeVisualSignature {
   motion_seed?: number;
   /** One or more primitives composing the moving brush head. */
   brush_heads: BrushHeadShape[];
-  /** Whole-stroke ink behaviour derived from average path intensity. */
+  /** Persisted calligraphy allocation, otherwise the intensity-derived original instrument. */
   brush_style: BrushStrokeStyle;
   /** -1 = cold, 0 = neutral, +1 = warm. */
   color_temperature: number;
@@ -260,6 +261,12 @@ export interface TransitionPath {
   agent_id: string;
   from: string;
   to: string;
+  /** Missing on archived legacy work. Only the one example has fixed endpoints. */
+  generation_mode?: "autonomous" | "example";
+  /** Absent on historical phrase-based artwork; new validated paths are word-only. */
+  anchor_format?: "single_word";
+  /** Persisted instrument allocation; never changes with filtering or replay. */
+  brush_treatment?: BrushTreatment;
   motion_type: MotionType;
   created_at: number;
   /** Back-compat alias of created_at used by the geometry sorter. */
@@ -290,7 +297,7 @@ export interface TransitionPath {
   branching_model?: BranchingModel;
   /** Animation/temporal-pacing strategy the mood selected. */
   motion_model?: MotionModel;
-  /** Number of semantic anchors the mood restructured the path to. */
+  /** Exact model-authored anchor count for autonomous/example work; legacy depth otherwise. */
   semantic_depth?: number;
   /** Persisted seven-variable appearance contract (legacy strokes may omit). */
   visual_signature?: StrokeVisualSignature;

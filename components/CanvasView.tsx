@@ -4,6 +4,8 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import type { Agent, StrokeTransform, TransitionPath } from "@/lib/types";
 import { StrokeRenderer } from "@/render/strokeRenderer";
 import { MeteorRenderer } from "@/render/meteorRenderer";
+import SphereCanvasView from "@/components/SphereCanvasView";
+import { DEFAULT_MOTION_SPEED, scaledMotionDelta, type SphereViewControls } from "@/engine/playbackControls";
 import { getStrokePlayback, strokeDistanceAtTime, type StrokePlaybackTiming } from "@/engine/strokePlayback";
 import { hashStr } from "@/simulation/rng";
 import { skyDisplayView, type SkyDisplayBox } from "@/engine/skyLayout";
@@ -30,6 +32,8 @@ const clampStrokeScale = (s: number) => Math.max(STROKE_MIN_SCALE, Math.min(STRO
 
 export interface CanvasHandle {
   resetTransform: (id: string) => void;
+  /** Restore the last database-confirmed transform without triggering another save. */
+  restoreTransform: (id: string, transform: StrokeTransform) => void;
   /** Rotate the stroke by a relative angle (radians) about its centroid — keyboard rotate steps. */
   rotateBy: (id: string, deltaRadians: number) => void;
   /** Current committed transform for a stroke (used by Save & Exit persistence). */
@@ -53,6 +57,10 @@ interface Props {
   displayMode?: CanvasDisplayMode;
   /** Live Animated tail preference, independent of the stroke's own attributes. */
   trailRetention?: number;
+  /** Live presentation multiplier; never changes the artwork's own timing. */
+  motionSpeed?: number;
+  /** When provided, Sphere controls live in the parent page's bottom dock. */
+  sphereControls?: SphereViewControls;
   /** Controlled time fraction. Omit for the continuously animated star field. */
   playback?: {
     progress: number;
@@ -64,7 +72,7 @@ interface Props {
   };
 }
 
-const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
+const PlanarCanvasView = forwardRef<CanvasHandle, Props>(function PlanarCanvasView({
   paths,
   agents,
   selectedStrokeId,
@@ -77,8 +85,14 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   displayLayout,
   displayMode = "animated",
   trailRetention = ANIMATED_TRAIL_RETENTION,
+  motionSpeed = DEFAULT_MOTION_SPEED,
 }: Props, ref) {
   useImperativeHandle(ref, () => ({
+    restoreTransform(id: string, transform: StrokeTransform) {
+      storeRef.current.updateTransform(id, transform);
+      brushDirtyRef.current = true;
+      setTick((t) => t + 1);
+    },
     resetTransform(id: string) {
       storeRef.current.updateTransform(id, IDENTITY_TRANSFORM);
       setTick((t) => t + 1);
@@ -104,6 +118,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   const displayLayoutRef = useRef(displayLayout);
   const displayModeRef = useRef(displayMode);
   const trailRetentionRef = useRef(clampTrailRetention(trailRetention));
+  const motionSpeedRef = useRef(motionSpeed);
   const storeRef = useRef<StrokeStore>(new StrokeStore());
   const editorRef = useRef<StrokeEditor | null>(null);
   const selIdRef = useRef<string | null>(selectedStrokeId);
@@ -132,6 +147,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
   displayLayoutRef.current = displayLayout;
   displayModeRef.current = displayMode;
   trailRetentionRef.current = clampTrailRetention(trailRetention);
+  motionSpeedRef.current = motionSpeed;
 
   // mount renderer + animation loop
   useEffect(() => {
@@ -188,6 +204,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     document.addEventListener("visibilitychange", visibilityChanged);
     const loop = (now: number) => {
       const delta = previousTime === 0 ? 0 : Math.max(0, now - previousTime);
+      const motionDelta = scaledMotionDelta(delta, motionSpeedRef.current);
       previousTime = now;
       const store = storeRef.current;
       const d = store.takeDirty();
@@ -225,7 +242,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
         const viewport = { width: canvas.clientWidth, height: canvas.clientHeight };
         for (const path of visiblePaths) {
           readableViews.set(path.id, strokeDisplayView(
-            store.controlPointsOf(path.id), store.transformOf(path.id), viewport, viewRef.current,
+            store.controlPointsOf(path.id), store.transformOf(path.id), viewport, viewRef.current, Boolean(path.generation_mode),
           ));
         }
       }
@@ -266,10 +283,10 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
         } else if (presentation === "sky") {
           // A comparison sky keeps all ten results visible after arrival.
           // Replaying it resets only this local clock, not model generation.
-          flight.elapsed += delta;
+          flight.elapsed += motionDelta;
           timeProgress = Math.min(1, flight.elapsed / flight.timing.durationMs);
         } else {
-          flight.elapsed += delta;
+          flight.elapsed += motionDelta;
           const cycle = flight.timing.durationMs + 1800;
           const cycleTime = flight.elapsed % cycle;
           timeProgress = Math.min(1, cycleTime / flight.timing.durationMs);
@@ -644,7 +661,7 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
     const pts = store.controlPointsOf(selectedStrokeId);
     const v = displayLayout?.get(selectedStrokeId)
       ? skyDisplayView(pts, displayLayout.get(selectedStrokeId)!)
-      : strokeDisplayView(pts, store.transformOf(selectedStrokeId), { width: W, height: H }, viewRef.current);
+      : strokeDisplayView(pts, store.transformOf(selectedStrokeId), { width: W, height: H }, viewRef.current, Boolean(paths.find((path) => path.id === selectedStrokeId)?.generation_mode));
     // The overlay lives in SCREEN space, so map each world control point through
     // the view transform: screen = world * scale + translate (then to px).
     const sx = (wx: number) => (wx * v.scale + v.translateX) * W;
@@ -767,6 +784,19 @@ const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView({
       )}
     </div>
   );
+});
+
+const CanvasView = forwardRef<CanvasHandle, Props>(function CanvasView(props, ref) {
+  // Separate render surfaces keep rotation display-only and leave the planar
+  // editor, detail scrubber and stored artwork geometry completely unchanged.
+  if (props.displayMode === "sphere" && !props.editMode && !props.playback) {
+    return <SphereCanvasView ref={ref} paths={props.paths} agents={props.agents}
+      selectedStrokeId={props.selectedStrokeId} filterAgentId={props.filterAgentId}
+      onSelectStroke={props.onSelectStroke} trailRetention={props.trailRetention}
+      motionSpeed={props.motionSpeed} sphereControls={props.sphereControls}
+      staggerExisting={!props.displayLayout} />;
+  }
+  return <PlanarCanvasView {...props} ref={ref} />;
 });
 
 export default CanvasView;

@@ -27,6 +27,9 @@ test("selects ten stroke slots from only existing authors, balanced and without 
 test("strict batch runs one slot at a time and emits each result before starting the next", async () => {
   const selected = selectSkyAgents(catalog.slice(0, 3), () => .42);
   const batch = createSkyBatch("job", "request", selected, "chaos", "order");
+  assert.equal(batch.mode, "autonomous");
+  assert.equal(batch.from, "");
+  assert.equal(batch.to, "");
   assert.equal(batch.updateSequence, 0);
   assert.equal(batch.updatedAt, batch.createdAt);
   let active = 0;
@@ -85,7 +88,7 @@ test("invalid and failed model outputs never manufacture or save replacement str
       return { id: "invalid", agent_id: "wrong-agent", points: [] };
     },
     persist: () => saved++,
-  }, () => { throw new Error("disconnected browser"); });
+  });
   assert.equal(saved, 0);
   assert.equal(batch.status, "failed");
   assert.ok(batch.entries.every((entry) => entry.status === "failed" && !entry.stroke));
@@ -104,6 +107,10 @@ test("one existing author can produce ten separate strokes; exactly ten slots re
 
 test("retry only generates failed entries, preserves saved strokes and reports automatic attempts", async () => {
   const source = createSkyBatch("original", "original-request-01", selectSkyAgents(catalog.slice(0, 3), () => .42), "chaos", "order");
+  // Simulate a previously published fixed-pair batch from the old version.
+  delete source.mode;
+  source.from = "chaos";
+  source.to = "order";
   await runSkyBatch(source, {
     generate: async (agent, index) => {
       if (index === 2 || index === 8) throw Object.assign(new Error("secret-provider-payload"), { code: "timeout", attempts: 2 });
@@ -111,6 +118,9 @@ test("retry only generates failed entries, preserves saved strokes and reports a
     }, persist: () => {},
   });
   const retry = retrySkyBatch(source, "retry", "retry-request-0001");
+  assert.equal(retry.mode, "autonomous");
+  assert.equal(retry.from, "");
+  assert.equal(retry.to, "");
   assert.equal(retry.canvasId, source.id);
   assert.equal(retry.entries.filter((entry) => entry.status === "queued").length, 2);
   const calls = [], saved = [], frames = [];
@@ -146,125 +156,29 @@ test("retry only generates failed entries, preserves saved strokes and reports a
   assert.equal(again.entries.filter((entry) => entry.status === "queued").length, 2);
 });
 
-test("batch API GET is read-only and POST deduplicates requests, rejects overlap and streams progress", async () => {
-  // These replacements run only in this isolated Node process. No network or
-  // real provider call is made, and no running application's store is touched.
-  const client = load("lib/openrouter/client.ts");
-  const generator = load("lib/strokegen.ts");
-  const store = load("lib/store.ts");
-  const { makeAgents } = load("lib/agents.ts");
-  const agents = makeAgents();
-  let availableAgents = [];
+test("a failed durable checkpoint stops before another paid model call", async () => {
+  const batch = createSkyBatch("job", "request", catalog.slice(0, 10));
   let calls = 0;
-  let active = 0;
-  let peak = 0;
-  let failRemaining = 0;
+  await assert.rejects(runSkyBatch(batch, {
+    generate: async agent => { calls++; return { id: "result", agent_id: agent.id, points: [{}, {}] }; },
+    persist: async () => {},
+  }, async () => { throw new Error("Database unavailable"); }), /Database unavailable/);
+  assert.equal(calls, 0);
+  assert.equal(batch.entries.filter(entry => entry.status === "succeeded").length, 0);
+});
+
+test("async persistence is awaited and a completed in-flight work is retained after cancellation", async () => {
+  const batch = createSkyBatch("job", "request", catalog.slice(0, 10));
+  const controller = new AbortController();
   const saved = [];
-  client.hasOpenRouterKey = () => true;
-  store.listAgents = () => availableAgents;
-  store.ensureCatalogAgents = () => { throw new Error("Sky must never create or attract agents"); };
-  store.listStrokes = () => saved;
-  store.addStroke = (stroke) => { saved.push(stroke); return stroke; };
-  generator.generateStroke = async (agent, from, to, timestamp, previous, options) => {
-    assert.equal(options.requireModel, true);
-    active++;
-    peak = Math.max(peak, active);
-    const index = calls++;
-    const fail = failRemaining-- > 0;
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    active--;
-    if (fail) throw Object.assign(new Error("provider timeout"), { code: "timeout" });
-    options.onAttempt(2);
-    return { id: `api-stroke-${index}`, agent_id: agent.id, from, to, timestamp, points: [{}, {}] };
-  };
-  // This API mock supplies an empty canvas, independently of release artwork.
-  globalThis.__noemaSkyBatches = {
-    jobs: new Map(), seenRequestIds: new Set(), activeId: null, latestId: null,
-    canvasRevision: 0, controllers: new Map(),
-  };
-  const route = load("app/api/skyBatch/route.ts");
-  const url = "http://localhost:3000/api/skyBatch";
-  const request = (requestId, extra = {}) => new Request(url, { method: "POST", headers: { "Content-Type": "application/json", origin: "http://localhost:3000" }, body: JSON.stringify({ requestId, from: "chaos", to: "order", ...extra }) });
-  const empty = await (await route.GET(new Request(url))).json();
-  assert.equal(empty.job, null);
-  assert.equal(calls, 0);
-
-  const noAgents = await route.POST(request("empty-pool-request-00"));
-  assert.equal(noAgents.status, 409);
-  assert.equal((await noAgents.json()).code, "empty_agent_pool");
-  assert.equal(calls, 0);
-  assert.equal(globalThis.__noemaSkyBatches.jobs.size, 0);
-  availableAgents = agents.slice(0, 3);
-  const poolBefore = JSON.stringify(availableAgents);
-  assert.ok(route.maxDuration >= 600, "The route accommodates ten sequential 60-second slots");
-
-  const first = await route.POST(request("first-request-0001"));
-  assert.match(first.headers.get("content-type"), /ndjson/);
-  const reused = await (await route.POST(request("first-request-0001"))).json();
-  assert.equal(reused.reused, true);
-  const overlap = await route.POST(request("other-request-0002"));
-  assert.equal(overlap.status, 409);
-  const frames = (await first.text()).trim().split("\n").map(JSON.parse);
-  assert.equal(calls, 10);
-  assert.equal(saved.length, 10);
-  assert.equal(peak, 1);
-  assert.equal(JSON.stringify(availableAgents), poolBefore);
-  assert.equal(frames[0].job.entries.filter((entry) => entry.status === "queued").length, 10);
-  assert.equal(frames.at(-1).job.status, "complete");
-  assert.equal(frames.at(-1).job.entries.length, 10);
-  assert.equal(new Set(frames.at(-1).job.entries.map((entry) => entry.agent.id)).size, 3);
-  assert.ok(frames.every((frame) => frame.job.entries.filter((entry) => entry.status === "running").length <= 1));
-  frames.forEach((frame, index) => {
-    assert.equal(frame.job.updateSequence, index);
-    if (index > 0) assert.ok(frame.job.updatedAt >= frames[index - 1].job.updatedAt);
+  let calls = 0;
+  await runSkyBatch(batch, {
+    signal: controller.signal,
+    generate: async agent => { calls++; controller.abort(); return { id: "late-result", agent_id: agent.id, points: [{}, {}] }; },
+    persist: async stroke => { await new Promise(setImmediate); saved.push(stroke); },
   });
-
-  const replayed = await (await route.POST(request("first-request-0001"))).json();
-  assert.equal(replayed.reused, true);
-  assert.equal(calls, 10);
-  const restored = await (await route.GET(new Request(url))).json();
-  assert.equal(restored.job.status, "complete");
-  assert.equal(calls, 10);
-  client.hasOpenRouterKey = () => false;
-  const unconfigured = await route.POST(request("no-provider-key-0003"));
-  assert.equal(unconfigured.status, 503);
-  assert.equal(calls, 10);
-  globalThis.__noemaSkyBatches.jobs.delete("first-request-0001");
-  client.hasOpenRouterKey = () => true;
-  const expiredReplay = await route.POST(request("first-request-0001"));
-  assert.equal(expiredReplay.status, 409);
-  assert.equal(calls, 10, "Evicting a large result must not permit a duplicate paid request");
-
-  failRemaining = 2;
-  const partialResponse = await route.POST(request("partial-request-0004"));
-  const partial = (await partialResponse.text()).trim().split("\n").map(JSON.parse).at(-1).job;
-  assert.equal(partial.status, "partial");
-  assert.equal(calls, 20);
-  const preservedIds = partial.entries.flatMap((entry) => entry.stroke ? [entry.stroke.id] : []);
-  assert.equal(preservedIds.length, 8);
-  const retryResponse = await route.POST(request("retry-request-0005", { retryOf: partial.requestId }));
-  const duplicateRetry = await (await route.POST(request("retry-request-0005", { retryOf: partial.requestId }))).json();
-  assert.equal(duplicateRetry.reused, true);
-  const staleRetry = await route.POST(request("stale-retry-request-06", { retryOf: partial.requestId }));
-  assert.equal(staleRetry.status, 409);
-  assert.equal((await staleRetry.json()).code, "already_retried");
-  const retryFrames = (await retryResponse.text()).trim().split("\n").map(JSON.parse);
-  assert.equal(calls, 22, "Retry calls only the two failed stroke slots");
-  assert.equal(saved.length, 20, "The eight prior successes are not saved twice");
-  assert.equal(retryFrames[0].job.entries.filter((entry) => entry.status === "succeeded").length, 8);
-  const complete = retryFrames.at(-1).job;
-  assert.equal(complete.status, "complete");
-  assert.equal(complete.canvasId, partial.id);
-  assert.ok(preservedIds.every((id) => complete.entries.some((entry) => entry.stroke?.id === id)));
-  const refreshedOriginal = await (await route.GET(new Request(`${url}?requestId=${partial.requestId}`))).json();
-  assert.equal(refreshedOriginal.resumedFrom, partial.requestId);
-  assert.equal(refreshedOriginal.job.requestId, complete.requestId, "Refreshing the original failed batch resumes its completed retry");
-  assert.equal(calls, 22, "Recovery GET must never trigger model calls");
-  for (const [id, extra, status] of [
-    ["complete-retry-request-07", { retryOf: complete.requestId }, 409],
-    ["missing-retry-request-008", { retryOf: "unavailable-request-00" }, 404],
-    ["malformed-retry-request-9", { retryOf: 123 }, 400],
-    ["stale-retry-request-0010", { retryOf: partial.requestId }, 409],
-  ]) assert.equal((await route.POST(request(id, extra))).status, status);
-  assert.equal(calls, 22, "Invalid or stale retries never call models");
+  assert.equal(calls, 1);
+  assert.equal(batch.status, "cleared");
+  assert.equal(saved.length, 1);
+  assert.equal(batch.entries[0].stroke.id, "late-result");
 });

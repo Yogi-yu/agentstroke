@@ -8,6 +8,7 @@ const { StrokeEditor } = load("canvas/StrokeEditor.ts");
 const { centroidOf, applyTransform } = load("engine/strokeMutation.ts");
 const { worldToScreen, screenToWorld } = load("store/canvasTransform.ts");
 const { sampleMeteorCenterline, sampleBrushMaterial } = load("render/meteorRenderer.ts");
+const { agentAuthoredDistance } = load("engine/visualSignature.ts");
 
 const identity = { translation: { x: 0, y: 0 }, rotation: 0, scale: 1 };
 const camera = { scale: 1, translateX: 0, translateY: 0 };
@@ -113,6 +114,60 @@ test("readability gain is bounded at five and apparent size remains strictly mon
     return bounds(points, viewport, strokeDisplayView(points, identity, viewport, camera)).extent;
   });
   assert.ok(aroundCap[1] - aroundCap[0] < .00001, "The max-gain boundary must not cause a size jump");
+});
+
+test("authored readability is monotonic and continuous without the legacy fixed-footprint floor", () => {
+  const viewport = { width: 1000, height: 800 };
+  let lastExtent = -1;
+  for (const extent of [0, .005, .01, .1, 1, 5, 10, 11.11111, 11.11112, 20, 30, 60, 90, 99.99999, 100, 100.00001, 180, 500]) {
+    const points = [{ x: .25, y: .3 }, { x: .25 + extent / viewport.width, y: .3 }];
+    const view = strokeDisplayView(points, identity, viewport, camera, true);
+    const displayed = bounds(points, viewport, view).extent;
+    assert.ok(view.scale >= 1 - 1e-12 && view.scale <= 3);
+    assert.ok(displayed > lastExtent, `${extent}px must remain visibly larger than every smaller authored mark`);
+    lastExtent = displayed;
+  }
+  const compact = extent => {
+    const points = [{ x: .25, y: .3 }, { x: .25 + extent / viewport.width, y: .3 }];
+    return bounds(points, viewport, strokeDisplayView(points, identity, viewport, camera, true)).extent;
+  };
+  near(compact(20), Math.sqrt(2000));
+  near(compact(80), Math.sqrt(8000));
+  near(compact(80) / compact(20), 2);
+  assert.ok(compact(100.00001) - compact(99.99999) < .0001);
+  assert.ok(compact(11.11112) - compact(11.11111) < .0001);
+});
+
+test("new authored distances remain clearly different after mobile and desktop readability cameras", () => {
+  for (const viewport of [{ width: 320, height: 640 }, { width: 390, height: 720 }, desktop]) {
+    const extents = [5, 8, 12, 16].map(count => {
+      const points = [{ x: .025, y: .5 }, { x: .025 + agentAuthoredDistance(count), y: .5 }];
+      const view = strokeDisplayView(points, identity, viewport, camera, true);
+      return bounds(points, viewport, view).extent;
+    });
+    assert.ok(extents[0] >= 39, "Even a five-word mark stays discernible at narrow widths");
+    for (let i = 1; i < extents.length; i++) assert.ok(extents[i] > extents[i - 1]);
+    assert.ok(extents[3] / extents[0] >= 7, "Five to sixteen words retain at least sevenfold visible footprint contrast even on mobile");
+    assert.ok(extents[2] / extents[1] >= 2.5, "Medium and long routes must not be fitted to the same footprint");
+  }
+});
+
+test("authored camera gains do not cancel manual edits or shift the display pivot", () => {
+  const points = [{ x: .3, y: .4 }, { x: .315, y: .409 }, { x: .31, y: .42 }];
+  const center = centroidOf(points);
+  const common = { scale: 1.7, translateX: -.1, translateY: .07 };
+  const base = strokeDisplayView(points, identity, desktop, common, true);
+  for (const scale of [.25, 1, 3]) {
+    for (const rotation of [0, .4, Math.PI / 2]) {
+      const transform = { scale, rotation, translation: { x: .1, y: -.05 } };
+      const edited = points.map(point => applyTransform(point, transform, center));
+      const view = strokeDisplayView(edited, transform, desktop, common, true);
+      near(view.scale, base.scale);
+      const movedCenter = centroidOf(edited);
+      nearPoint(worldToScreen(movedCenter, view), worldToScreen(movedCenter, common));
+      for (const point of edited) nearPoint(screenToWorld(worldToScreen(point, view), view), point);
+    }
+  }
 });
 
 test("true points, empty input, invalid viewports and already readable routes retain their camera", () => {

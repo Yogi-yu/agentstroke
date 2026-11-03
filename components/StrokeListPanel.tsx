@@ -4,9 +4,8 @@
 // StrokeListPanel — LEFT PANEL · the generated A→B strokes.
 // ----------------------------------------------------------------------------
 // Lists every stroke on the canvas. Each card carries an action bar with the
-// REQUIRED order View Agent → Edit → Delete (Issue 4). "View Agent" is the CORE
-// NAVIGATION ELEMENT → /agent/:agent_id and must not be removed. "Delete"
-// triggers GLOBAL stroke removal (store + server + canvas) via a confirm modal.
+// Action order: View Agent → Edit → Remove. Removal hides this visitor's canvas
+// membership only; the original artwork remains available in the archive.
 // ============================================================================
 
 import { useEffect, useMemo, useRef } from "react";
@@ -24,7 +23,7 @@ interface Props {
   onSelect: (id: string | null) => void;
   /** Enter edit mode on a stroke (selects + focuses it). */
   onEdit: (id: string) => void;
-  /** Request GLOBAL deletion of a stroke (opens the confirmation modal). */
+  /** Request removal from this canvas (opens the confirmation modal). */
   onDelete: (id: string) => void;
   /** Clear ALL strokes from the canvas. */
   onClear: () => void;
@@ -60,11 +59,12 @@ export default function StrokeListPanel({
         <h2>Strokes</h2>
         <div className="sl-head-actions">
           <span className="muted">{strokes.length} on canvas</span>
+          <Link className="sl-archive" href="/archive">Archive ↗</Link>
           <button
             className="sl-clear"
             disabled={locked || strokes.length === 0}
             onClick={onClear}
-            title="Clear all strokes from the canvas"
+            title="Clear this canvas; keep all artworks in the archive"
           >
             Clear
           </button>
@@ -73,7 +73,7 @@ export default function StrokeListPanel({
       <div className="card-list" ref={listRef}>
         {ordered.length === 0 && (
           <div className="cards-empty">
-            No strokes yet. Open an economic agent and enter creation mode (A → B).
+            Your canvas is empty. Restore a saved artwork from the Archive, or open an agent to create a new stroke.
           </div>
         )}
         {ordered.map((s) => {
@@ -103,10 +103,13 @@ export default function StrokeListPanel({
                 <span>{nameById.get(s.agent_id) ?? s.agent_id}</span>
                 <span>{s.motion_type}</span>
                 <span>{s.points.length} pts</span>
+                {s.generation_mode === "example" && <span>Example</span>}
+                {s.generation_mode === "autonomous" && <span>Agent-authored</span>}
+                {s.brush_treatment === "calligraphy" && <span>Calligraphy brush</span>}
               </div>
               <div className="sc-time">{new Date(s.created_at).toLocaleTimeString("en-US", { hour12: false })}</div>
 
-              {/* Card actions — REQUIRED ORDER: View Agent → Edit → Delete (Issue 4).
+              {/* Card actions — View Agent → Edit → Remove.
                   "View Agent" is the core navigation element to /agent/:id. */}
               <div className="sc-actions" onClick={(e) => e.stopPropagation()}>
                 <Link
@@ -128,9 +131,9 @@ export default function StrokeListPanel({
                   className="sc-act sc-act-delete"
                   disabled={locked}
                   onClick={() => !locked && onDelete(s.id)}
-                  title="Delete this stroke"
+                  title="Remove from canvas; keep in archive"
                 >
-                  Delete
+                  Remove from canvas
                 </button>
               </div>
             </div>

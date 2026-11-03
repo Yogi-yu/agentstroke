@@ -1,9 +1,9 @@
-import { SKY_BATCH_SIZE, type SkyBatch } from "@/lib/skyBatch";
+import { SKY_BATCH_SIZE, skyBatchSize, skyTargetCount, type SkyBatch, type SkyBatchSize, type SkyMode } from "@/lib/skyBatch";
 
-/** Fixed ten-slot composition: new results never move an existing stroke. */
-export function skyDisplayLayout(slotIds: readonly string[], portrait: boolean) {
+/** Fixed reserved-slot composition: new results never move an existing stroke. */
+export function skyDisplayLayout(slotIds: readonly string[], portrait: boolean, targetCount: SkyBatchSize = slotIds.length > SKY_BATCH_SIZE ? 20 : SKY_BATCH_SIZE) {
   const columns = portrait ? 2 : 5;
-  const rows = SKY_BATCH_SIZE / columns;
+  const rows = targetCount / columns;
   const top = 0.08;
   const fieldHeight = 0.84;
   const layout = new Map<string, { centerX: number; centerY: number; width: number; height: number }>();
@@ -66,7 +66,7 @@ export function acceptSkySnapshot(current: SkyBatch | null, incoming: SkyBatch |
 }
 
 /** Completion includes failures; the canvas and success count require artwork. */
-export function skyPresentation(job: SkyBatch | null, requesting: boolean, replayKey = 0) {
+export function skyPresentation(job: SkyBatch | null, requesting: boolean, replayKey = 0, pendingMode: SkyMode = "standard") {
   if (job?.status === "cleared") job = null;
   const entries = job?.entries ?? [];
   const paths = entries.flatMap((entry) => entry.status === "succeeded" && entry.stroke ? [entry.stroke] : []);
@@ -75,15 +75,16 @@ export function skyPresentation(job: SkyBatch | null, requesting: boolean, repla
   const completed = entries.filter((entry) => entry.status === "succeeded" || entry.status === "failed").length;
   const running = job ? job.status === "running" : requesting;
   const activeIndex = entries.findIndex((entry) => entry.status === "running");
+  const targetCount = job ? skyTargetCount(job) : skyBatchSize(pendingMode);
   return {
-    paths, succeeded, failed, completed, running,
+    paths, succeeded, failed, completed, running, targetCount,
     activeIndex,
     activeEntry: activeIndex >= 0 ? entries[activeIndex] : null,
     showCanvas: succeeded > 0,
     showProgress: requesting || !!job,
     canvasKey: `${job?.canvasId ?? job?.id ?? "empty"}:${replayKey}`,
-    headline: running ? `Generating… ${completed}/${SKY_BATCH_SIZE}`
-      : succeeded === SKY_BATCH_SIZE ? `Generation complete · ${completed}/${SKY_BATCH_SIZE}`
-        : `Generation finished · ${completed}/${SKY_BATCH_SIZE}`,
+    headline: running ? `Generating… ${completed}/${targetCount}`
+      : succeeded === targetCount ? `Generation complete · ${completed}/${targetCount}`
+        : `Generation finished · ${completed}/${targetCount}`,
   };
 }

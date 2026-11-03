@@ -10,9 +10,10 @@ export default function NoemaHome() {
           <span>Noema</span>
         </Link>
         <nav aria-label="Main navigation">
-          <Link className="active" href="/">Home</Link>
+          <Link className="active" href="/" aria-current="page">Home</Link>
           <Link href="/protocol">Protocol</Link>
           <Link href="/studio">Agent Snapshot</Link>
+          <Link href="/deck">Deck</Link>
         </nav>
         <Link className="silicon-enter" href="/studio">Enter <span>↗</span></Link>
       </header>

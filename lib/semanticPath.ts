@@ -116,8 +116,15 @@ function scalar(value: unknown): number {
   return numeric;
 }
 
+/** One lexical token, never a phrase disguised by spaces, punctuation or digits. */
+export function isSingleWordAnchor(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z]{1,48}$/.test(value.trim());
+}
+
 function anchor(value: unknown): string {
-  if (typeof value !== "string" || !value.trim() || value.trim().length > 256) invalid();
+  if (!isSingleWordAnchor(value)) invalid();
+  // Whitespace around one word is harmless; splitting, joining, shortening or
+  // replacing a phrase would invent semantic content and is never permitted.
   return value.trim();
 }
 
@@ -174,7 +181,7 @@ function rejectDuplicateKeys(source: string): void {
 }
 
 /** Accept complete JSON (optionally one code fence), never salvage a prefix. */
-export function parseSemanticPath(text: string, from: string, to: string): SemanticPath {
+export function parseSemanticPath(text: string, from?: string, to?: string): SemanticPath {
   let source = text.trim();
   if (!source || source.length > 32_768) invalid();
   const fence = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i.exec(source);
@@ -219,11 +226,17 @@ export function parseSemanticPath(text: string, from: string, to: string): Seman
     }
   }
   if (!semantic || semantic.anchors.length < 2 || semantic.anchors.length > 64) invalid();
-  const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
-  if (!same(semantic.anchors[0], from) || !same(semantic.anchors[semantic.anchors.length - 1], to)) invalid();
-  // Only harmless case/whitespace normalization, never replace a wrong concept.
-  semantic.anchors[0] = from;
-  semantic.anchors[semantic.anchors.length - 1] = to;
+  // Autonomous paths own both endpoints. Explicit constraints are reserved for
+  // the labelled example (and callers validating an existing historical path).
+  if ((from === undefined) !== (to === undefined)) invalid();
+  if (from !== undefined && to !== undefined) {
+    const first = anchor(from), last = anchor(to);
+    const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+    if (!same(semantic.anchors[0], first) || !same(semantic.anchors[semantic.anchors.length - 1], last)) invalid();
+    // Only harmless case/whitespace normalization, never replace a wrong concept.
+    semantic.anchors[0] = first;
+    semantic.anchors[semantic.anchors.length - 1] = last;
+  }
   return semantic;
 }
 
@@ -236,7 +249,7 @@ export function semanticContent(completion: unknown): string {
 }
 
 /** Check refusals/errors/truncation before trusting even syntactically valid JSON. */
-export function semanticPathFromCompletion(completion: unknown, from: string, to: string): SemanticPath {
+export function semanticPathFromCompletion(completion: unknown, from?: string, to?: string): SemanticPath {
   const response = record(completion);
   if (response?.error) throw classifySemanticGenerationError(response);
   const choices = response?.choices;

@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { createTypeScriptLoader } = require("./load-typescript.cjs");
-const { parseSemanticPath, semanticPathFromCompletion, classifySemanticGenerationError, isSemanticGenerationError } = createTypeScriptLoader()("lib/semanticPath.ts");
+const { parseSemanticPath, semanticPathFromCompletion, classifySemanticGenerationError, isSemanticGenerationError, isSingleWordAnchor } = createTypeScriptLoader()("lib/semanticPath.ts");
 
 const rows = [
   { anchor: "chaos", entropy: .8, confidence: .4 },
@@ -12,6 +12,20 @@ const legacy = { path: ["chaos", "pattern", "order"], entropy: [.8, .5, .2], con
 const normalized = { anchors: legacy.path, entropy: legacy.entropy, confidence: legacy.confidence };
 const parse = (value) => parseSemanticPath(JSON.stringify(value), "chaos", "order");
 const code = (expected) => (error) => { assert.equal(error.code, expected); assert.ok(isSemanticGenerationError(error)); return true; };
+
+test("autonomous parsing preserves chosen endpoints and every authored concept", () => {
+  const steps = [
+    { anchor: "invitation", entropy: .91, confidence: .18 },
+    { anchor: "harbour", entropy: .42, confidence: .72 },
+    { anchor: "invitation", entropy: .57, confidence: .87 },
+  ];
+  assert.deepEqual(parseSemanticPath(JSON.stringify({ steps })), {
+    anchors: steps.map((step) => step.anchor),
+    entropy: steps.map((step) => step.entropy),
+    confidence: steps.map((step) => step.confidence),
+  });
+  assert.throws(() => parseSemanticPath(JSON.stringify({ steps }), "invitation"), code("invalid_response"));
+});
 
 test("complete rows and legacy named arrays normalize without inventing semantic data", () => {
   for (const value of [rows, { steps: rows }, { path: rows }, { semantic_path: rows }, legacy,
@@ -27,6 +41,43 @@ test("finite numeric strings/case/whitespace normalize, including exact 0 and 1"
     { anchor: " order ", entropy: "1e-1", confidence: ".6" },
   ] });
   assert.deepEqual(path, { anchors: ["chaos", "order"], entropy: [0, .1], confidence: [1, .6] });
+});
+
+test("every position and supported response shape rejects phrases instead of rewriting them", () => {
+  for (const bad of [
+    "raw market noise", "two  words", "two\twords", "two\nwords", "two\u00a0words",
+    "self-aware", "agent's", "signal_noise", "word2", "42", "echo.", "a/b", "a+b",
+    "two\u200bwords", "café", "词语", "", "   ", "x".repeat(49), null, 123, true,
+  ]) {
+    assert.equal(isSingleWordAnchor(bad), false, String(bad));
+    for (const index of [0, 1, 2]) {
+      const changedRows = rows.map((row, i) => i === index ? { ...row, anchor: bad } : { ...row });
+      const before = JSON.stringify(changedRows);
+      for (const value of [
+        { steps: changedRows },
+        { anchors: changedRows.map(row => row.anchor), entropy: legacy.entropy, confidence: legacy.confidence },
+      ]) assert.throws(() => parseSemanticPath(JSON.stringify(value)), code("invalid_response"));
+      assert.equal(JSON.stringify(changedRows), before, "Validation cannot mutate source concepts");
+    }
+  }
+});
+
+test("single-word validation accepts harmless outer whitespace without changing internal spelling", () => {
+  for (const word of ["a", "I", "wu", "you", "echo", "Silence", "API", "pneumonoultramicroscopicsilicovolcanoconiosis"]) {
+    assert.equal(isSingleWordAnchor(word), true);
+    assert.equal(isSingleWordAnchor(` \t${word}\n`), true);
+    const result = parseSemanticPath(JSON.stringify({ steps: [
+      { anchor: ` \t${word}\n`, entropy: .7, confidence: .4 },
+      { anchor: "return", entropy: .3, confidence: .8 },
+    ] }));
+    assert.equal(result.anchors[0], word);
+  }
+});
+
+test("explicit endpoint constraints cannot reintroduce phrases after parsing", () => {
+  assert.throws(() => parseSemanticPath(JSON.stringify({ steps: rows }), "two words", "order"), code("invalid_response"));
+  assert.throws(() => parseSemanticPath(JSON.stringify({ steps: rows }), "chaos", "two words"), code("invalid_response"));
+  assert.deepEqual(parseSemanticPath(JSON.stringify({ steps: rows }), " chaos ", " order "), normalized);
 });
 
 test("invalid scalars cannot be silently coerced, defaulted, or clamped", () => {
