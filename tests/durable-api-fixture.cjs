@@ -16,7 +16,8 @@ async function apiFixture(t) {
     method, headers: { cookie: `noema_visitor=${user.repeat(64)}`, origin: "http://localhost:3000", "content-type": "application/json" },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const owner = user => load("lib/visitor.ts").visitorId(request("/", "GET", undefined, user));
+  // Different browser cookies intentionally resolve to one public canvas.
+  const owner = _user => load("lib/sharedCanvas.ts").SHARED_CANVAS_OWNER;
   const store = load("lib/store.ts");
   const seed = load("lib/publishedCanvas.ts").createPublishedCanvas().strokes[0];
   const stroke = (id, agentId = seed.agent_id) => ({ ...structuredClone(seed), id, agent_id: agentId, created_at: Date.now(), generation_mode: "autonomous" });

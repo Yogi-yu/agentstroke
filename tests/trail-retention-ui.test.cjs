@@ -66,8 +66,10 @@ function studioHarness({ saved = null, storageUnavailable = false } = {}) {
       if (name.startsWith("@/")) return pureLoad(name.slice(2) + ".ts");
       return require(name);
     };
-    new Function("require", "module", "exports", "window", "localStorage", "setInterval", "clearInterval", compiled)(
-      localRequire, module, module.exports, new EventTarget(), storage, () => 1, () => {},
+    const document = new EventTarget();
+    document.visibilityState = "visible";
+    new Function("require", "module", "exports", "window", "document", "localStorage", "setInterval", "clearInterval", compiled)(
+      localRequire, module, module.exports, new EventTarget(), document, storage, () => 1, () => {},
     );
     return module.exports.default;
   };

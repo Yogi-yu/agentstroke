@@ -33,6 +33,16 @@ const EMPTY: AppSnapshot = Object.freeze({
 
 type Listener = () => void;
 
+/** Keep unchanged object/array identities: polling must not restart animation. */
+function reconcileRecords<T extends { id: string }>(current: T[], incoming: T[]): T[] {
+  const byId = new Map(current.map(item => [item.id, item]));
+  const next = incoming.map(item => {
+    const previous = byId.get(item.id);
+    return previous && JSON.stringify(previous) === JSON.stringify(item) ? previous : item;
+  });
+  return next.length === current.length && next.every((item, i) => item === current[i]) ? current : next;
+}
+
 class AppStore {
   private agents: AgentProfile[] = [];
   private strokes: TransitionPath[] = [];
@@ -44,6 +54,8 @@ class AppStore {
   private capacity = 0;
   private canvasRevision: number | null = null;
   private strokeEpoch = 0;
+  private readSequence = 0;
+  private refreshing = false;
   private resetRevision = 0;
   private clearing = false;
   private resetSubscription: (() => void) | null = null;
@@ -140,20 +152,22 @@ class AppStore {
     this.ensureResetSync();
     if (this.clearing) return;
     const epoch = this.strokeEpoch;
+    const sequence = ++this.readSequence;
     try {
       const [ar, sr] = await Promise.all([
-        fetch("/api/agents", { cache: "no-store" }),
-        fetch("/api/strokes", { cache: "no-store" }),
+        fetch("/api/agents", { cache: "no-store", signal: AbortSignal.timeout(12000) }),
+        fetch("/api/strokes", { cache: "no-store", signal: AbortSignal.timeout(12000) }),
       ]);
       if (!ar.ok || !sr.ok) throw new Error("Could not load the canvas.");
       const [ad, sd] = await Promise.all([ar.json(), sr.json()]);
-      this.agents = ad.agents ?? [];
+      if (sequence !== this.readSequence || this.clearing) return;
+      this.agents = reconcileRecords(this.agents, ad.agents ?? []);
       this.capacity = ad.capacity ?? this.agents.length;
       if (epoch === this.strokeEpoch && !this.clearing && this.acceptServerRevision(sd.canvasRevision)) {
-        this.strokes = sd.strokes ?? [];
+        this.strokes = reconcileRecords(this.strokes, sd.strokes ?? []);
       }
     } catch {
-      this.storageFailure("Could not load your saved canvas. Your last known view has been kept. Please reload to retry.");
+      this.storageFailure("Could not load the shared canvas. The last known view has been kept. Please reload to retry.");
     }
     this.ready = true;
     this.emit();
@@ -202,6 +216,7 @@ class AppStore {
       const r = await fetch("/api/agents", { method: "POST" });
       if (!r.ok) return this.storageFailure("Could not save the new agent. Please try again.");
       const d = await r.json();
+      this.readSequence++;
       if (Array.isArray(d.agents)) this.agents = d.agents;
       if (typeof d.capacity === "number") this.capacity = d.capacity;
       this.emit();
@@ -220,6 +235,7 @@ class AppStore {
       const r = await fetch(`/api/agents/${encodeURIComponent(id)}`, { method: "DELETE" });
       if (!r.ok) return this.storageFailure("Could not remove this agent. Your available agents have not changed.");
       const d = await r.json();
+      this.readSequence++;
       this.agents = Array.isArray(d.agents) ? d.agents : this.agents.filter((a) => a.id !== id);
       if (typeof d.capacity === "number") this.capacity = d.capacity;
       this.emit();
@@ -236,6 +252,7 @@ class AppStore {
       const r = await fetch("/api/agents", { method: "DELETE" });
       if (!r.ok) return this.storageFailure("Could not clear your available agents. Your pool has not changed.");
       const d = await r.json();
+      this.readSequence++;
       this.agents = Array.isArray(d.agents) ? d.agents : [];
       if (typeof d.capacity === "number") this.capacity = d.capacity;
       this.emit();
@@ -245,19 +262,36 @@ class AppStore {
     }
   }
 
-  async refresh(): Promise<void> {
+  async refresh(includeAgents = false): Promise<void> {
     this.ensureResetSync();
-    if (this.clearing) return;
+    if (this.clearing || this.refreshing) return;
+    this.refreshing = true;
     const epoch = this.strokeEpoch;
+    const sequence = ++this.readSequence;
     try {
-      const sr = await fetch("/api/strokes", { cache: "no-store" });
-      if (!sr.ok) { this.storageFailure("Your saved canvas could not be refreshed. The last known view is still displayed."); return; }
+      const [sr, ar] = await Promise.all([
+        fetch("/api/strokes", { cache: "no-store", signal: AbortSignal.timeout(12000) }),
+        includeAgents ? fetch("/api/agents", { cache: "no-store", signal: AbortSignal.timeout(12000) }) : null,
+      ]);
+      if (!sr.ok || (ar && !ar.ok)) { this.storageFailure("The shared canvas could not be refreshed. The last known view is still displayed."); return; }
       const data = await sr.json();
-      if (epoch !== this.strokeEpoch || this.clearing || !this.acceptServerRevision(data.canvasRevision)) return;
-      this.strokes = data.strokes ?? this.strokes;
+      const agentData = ar ? await ar.json() : null;
+      if (sequence !== this.readSequence || epoch !== this.strokeEpoch || this.clearing || !this.acceptServerRevision(data.canvasRevision)) return;
+      // A pending local gesture owns its preview until its PATCH is acknowledged.
+      const local = new Map(this.strokes.map(stroke => [stroke.id, stroke]));
+      const incoming = ((data.strokes ?? this.strokes) as TransitionPath[]).map(stroke =>
+        (this.persistTimers.has(stroke.id) || this.transformWrites.has(stroke.id)) && local.has(stroke.id) ? local.get(stroke.id)! : stroke);
+      this.strokes = reconcileRecords(this.strokes, incoming);
+      if (agentData) {
+        this.agents = reconcileRecords(this.agents, agentData.agents ?? []);
+        this.capacity = agentData.capacity ?? this.agents.length;
+      }
+      this.ready = true;
       this.emit();
     } catch {
       this.storageFailure("Storage is unreachable. The last known canvas is still displayed.");
+    } finally {
+      this.refreshing = false;
     }
   }
 
@@ -283,7 +317,8 @@ class AppStore {
       const d = await r.json();
       if (epoch !== this.strokeEpoch || !this.acceptServerRevision(d.canvasRevision)) return;
       if (r.ok && d.stroke) {
-        this.strokes = [...this.strokes, d.stroke as TransitionPath];
+        this.readSequence++;
+        this.strokes = [...this.strokes.filter(stroke => stroke.id !== d.stroke.id), d.stroke as TransitionPath];
         this.emit();
       } else {
         this.generationError = typeof d.error === "string" ? d.error : "The agent could not create a stroke. Please try again.";
@@ -346,6 +381,7 @@ class AppStore {
       });
       if (!response.ok) return this.storageFailure("The stroke edit could not be saved. Its last saved position and size have been restored.");
       if (epoch !== this.strokeEpoch || this.clearing) return false;
+      this.readSequence++;
       this.strokes = this.strokes.map((s) => s.id === id ? { ...s, transform } : s);
       this.emit();
       return true;
@@ -364,6 +400,7 @@ class AppStore {
       if (!response.ok) return this.storageFailure("Could not remove this stroke from the canvas. It is still displayed.");
       const data = await response.json();
       if (data.deleted !== true) return this.storageFailure("Stroke removal was not confirmed. The canvas has not changed.");
+      this.readSequence++;
       this.strokes = this.strokes.filter((s) => s.id !== id);
       this.emit();
       return true;
@@ -383,6 +420,7 @@ class AppStore {
       const data = await response.json();
       if (!response.ok || !data.stroke) return this.storageFailure("Could not restore this artwork. Please try again.");
       if (epoch !== this.strokeEpoch || !this.acceptServerRevision(data.canvasRevision)) return false;
+      this.readSequence++;
       this.strokes = [...this.strokes.filter((s) => s.id !== data.stroke.id), data.stroke];
       this.emit();
       return true;

@@ -37,8 +37,10 @@ export class StrokeStore {
   private byId = new Map<string, Entry>();
   private dirty: { lo: number; hi: number } | null = null; // float range
 
-  /** Structural (re)build from the authoritative path list. Transforms persist. */
-  setData(paths: TransitionPath[], agents: Agent[]): void {
+  /** Structural (re)build from the authoritative shared path list.
+   * Only the actively edited stroke may keep an uncommitted local preview.
+   */
+  setData(paths: TransitionPath[], agents: Agent[], options: { localEditId?: string | null } = {}): void {
     const hueById = new Map(agents.map((a) => [a.id, a.style.hue]));
     const speedById = new Map(agents.map((a) => [a.id, a.style.speedFactor]));
 
@@ -67,10 +69,10 @@ export class StrokeStore {
         strokeIdx: i,
         agentIdx: agentIndex(path.agent_id),
       };
-      // Transform precedence: a live in-memory edit (already in the store) wins;
-      // otherwise hydrate from the stroke's PERSISTED transform so edits survive
-      // a refresh. Falls back to identity for never-edited strokes.
-      const t = this.transforms.has(path.id)
+      // A cached transform is not proof of a local edit: another visitor may
+      // have changed it since the previous poll. Preserve only the active edit
+      // preview; all other strokes follow the latest server-confirmed value.
+      const t = path.id === options.localEditId && this.transforms.has(path.id)
         ? this.transforms.get(path.id)
         : path.transform ?? IDENTITY_TRANSFORM;
       this.transforms.set(path.id, t);

@@ -135,7 +135,8 @@ test("durable Sphere API validates bounded size, generates twenty once and retri
   assert.equal((await f.store.listStrokes(f.owner("a"))).length, 21);
   assert.equal((await f.store.listAgents(f.owner("a"))).length, 23, "No synthetic agents were added");
   const other = await (await route.GET(f.request("/api/skyBatch?requestId=sphere-api-request-01", "GET", undefined, "b"))).json();
-  assert.equal(other.job, null);
+  assert.equal(other.job.requestId, final.requestId);
+  assert.equal(other.job.targetCount, 20);
   const replay = await post("sphere-api-retry-0001", { skyMode: "sphere" });
   assert.equal((await replay.json()).reused, true); assert.equal(calls, 22);
   assert.ok(!JSON.stringify(frames).includes("provider-private-content"));

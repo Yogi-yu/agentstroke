@@ -5,6 +5,7 @@ import { createPublishedCanvas } from "@/lib/publishedCanvas";
 import { assignBrushTreatment, brushTreatmentForIndex } from "@/engine/brushAssignment";
 import { databaseTransaction, type DatabaseClient } from "@/lib/database";
 import type { SkyBatch } from "@/lib/skyBatch";
+import { migrateSharedCanvas, SHARED_CANVAS_OWNER } from "@/lib/sharedCanvas";
 
 export const PUBLIC_ARTWORK_OWNER = "public";
 interface AgentState { pool: AgentProfile[]; lastOut: Record<string, number> }
@@ -33,9 +34,18 @@ export async function ensureVisitor(db: DatabaseClient, owner: string): Promise<
   const row = (await db.query<VisitorRow>("SELECT * FROM noema_visitors WHERE owner_id=$1 FOR UPDATE", [owner])).rows[0];
   if (!row) throw new Error("Visitor storage initialization failed.");
   if (inserted.rowCount) {
-    for (const stroke of published.strokes) {
-      await archiveArtwork(db, PUBLIC_ARTWORK_OWNER, stroke, "published-example");
-      await db.query(`INSERT INTO noema_canvas(owner_id,artwork_id,hidden,transform_json,added_at) VALUES($1,$2,0,$3,$4) ON CONFLICT(owner_id,artwork_id) DO NOTHING`, [owner, stroke.id, stroke.transform ? JSON.stringify(stroke.transform) : null, now]);
+    const migration = owner === SHARED_CANVAS_OWNER ? await migrateSharedCanvas(db) : null;
+    if (migration?.agents_json !== undefined) Object.assign(row, {
+      agents_json: migration.agents_json, revision: migration.revision,
+      brush_sequence: migration.brush_sequence, latest_sky_request: migration.latest_sky_request,
+    });
+    // Only a truly new installation gets the example. An existing, intentionally
+    // empty canvas stays empty, and ordinary reads can never undo a public Clear.
+    if (!migration || migration.legacyVisitors === 0) {
+      for (const stroke of published.strokes) {
+        await archiveArtwork(db, PUBLIC_ARTWORK_OWNER, stroke, "published-example");
+        await db.query(`INSERT INTO noema_canvas(owner_id,artwork_id,hidden,transform_json,added_at) VALUES($1,$2,0,$3,$4) ON CONFLICT(owner_id,artwork_id) DO NOTHING`, [owner, stroke.id, stroke.transform ? JSON.stringify(stroke.transform) : null, now]);
+      }
     }
   }
   return row;
@@ -46,7 +56,7 @@ async function archiveArtwork(db: DatabaseClient, owner: string, stroke: Transit
   const agent = author ?? published.agents.find(a => a.id === stroke.agent_id) ?? catalog.find(a => a.id === stroke.agent_id);
   await db.query(`INSERT INTO noema_artworks(id,owner_id,payload,agent_json,created_at,source) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(id) DO NOTHING`, [stroke.id, owner, JSON.stringify(stroke), agent ? JSON.stringify(agent) : null, stroke.created_at, source]);
   const saved = (await db.query<ArtworkRow>("SELECT id,owner_id,payload FROM noema_artworks WHERE id=$1", [stroke.id])).rows[0];
-  if (!saved || (saved.owner_id !== owner && saved.owner_id !== PUBLIC_ARTWORK_OWNER)) throw new Error("Artwork identity collision; existing data was not changed.");
+  if (!saved || (owner !== SHARED_CANVAS_OWNER && saved.owner_id !== owner && saved.owner_id !== PUBLIC_ARTWORK_OWNER)) throw new Error("Artwork identity collision; existing data was not changed.");
   return pathFromRow(saved);
 }
 
@@ -136,7 +146,7 @@ export async function listStrokes(owner: string): Promise<TransitionPath[]> { re
 export async function getStroke(owner: string, id: string): Promise<TransitionPath | undefined> {
   return databaseTransaction(async db => {
     await ensureVisitor(db, owner);
-    const row = (await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_artworks a LEFT JOIN noema_canvas c ON c.artwork_id=a.id AND c.owner_id=$1 WHERE a.id=$2 AND (a.owner_id=$1 OR a.owner_id=$3)`, [owner, id, PUBLIC_ARTWORK_OWNER])).rows[0];
+    const row = (await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_artworks a LEFT JOIN noema_canvas c ON c.artwork_id=a.id AND c.owner_id=$1 WHERE a.id=$2 AND (a.owner_id=$1 OR a.owner_id=$3 OR $1=$4)`, [owner, id, PUBLIC_ARTWORK_OWNER, SHARED_CANVAS_OWNER])).rows[0];
     return row ? pathFromRow(row) : undefined;
   });
 }
@@ -164,7 +174,7 @@ export async function updateStrokeTransform(owner: string, id: string, transform
   });
 }
 
-/** Clear only this visitor's presentation; artwork and job history stay stored. */
+/** Clear the requested presentation (public for web routes); history stays stored. */
 export async function clearStrokes(owner: string): Promise<number> {
   return databaseTransaction(async db => {
     const visitor = await ensureVisitor(db, owner);
@@ -186,8 +196,8 @@ export async function listArchivedStrokes(owner: string, options: { limit?: numb
   const offset = Number.isFinite(options.offset) ? Math.max(0, Math.floor(options.offset!)) : 0;
   return databaseTransaction(async db => {
     await ensureVisitor(db, owner);
-    const rows = await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_artworks a LEFT JOIN noema_canvas c ON c.artwork_id=a.id AND c.owner_id=$1 WHERE a.owner_id=$1 OR a.owner_id=$2 ORDER BY a.created_at DESC,a.id DESC LIMIT $3 OFFSET $4`, [owner,PUBLIC_ARTWORK_OWNER,limit,offset]);
-    const total = (await db.query<{ count: number | string }>("SELECT count(*) AS count FROM noema_artworks WHERE owner_id=$1 OR owner_id=$2", [owner,PUBLIC_ARTWORK_OWNER])).rows[0].count;
+    const rows = await db.query<ArtworkRow>(`SELECT a.id,a.owner_id,a.payload,c.transform_json FROM noema_artworks a LEFT JOIN noema_canvas c ON c.artwork_id=a.id AND c.owner_id=$1 WHERE a.owner_id=$1 OR a.owner_id=$2 OR $1=$5 ORDER BY a.created_at DESC,a.id DESC LIMIT $3 OFFSET $4`, [owner,PUBLIC_ARTWORK_OWNER,limit,offset,SHARED_CANVAS_OWNER]);
+    const total = (await db.query<{ count: number | string }>("SELECT count(*) AS count FROM noema_artworks WHERE owner_id=$1 OR owner_id=$2 OR $1=$3", [owner,PUBLIC_ARTWORK_OWNER,SHARED_CANVAS_OWNER])).rows[0].count;
     return { strokes: rows.rows.map(pathFromRow), total: Number(total), limit, offset };
   });
 }
@@ -195,7 +205,7 @@ export async function restoreStroke(owner: string, id: string, options: { expect
   return databaseTransaction(async db => {
     const visitor = await ensureVisitor(db, owner);
     if (options.expectedRevision !== undefined && Number(visitor.revision) !== options.expectedRevision) return undefined;
-    const row = (await db.query<ArtworkRow>("SELECT id,owner_id,payload FROM noema_artworks WHERE id=$1 AND (owner_id=$2 OR owner_id=$3)", [id,owner,PUBLIC_ARTWORK_OWNER])).rows[0];
+    const row = (await db.query<ArtworkRow>("SELECT id,owner_id,payload FROM noema_artworks WHERE id=$1 AND (owner_id=$2 OR owner_id=$3 OR $2=$4)", [id,owner,PUBLIC_ARTWORK_OWNER,SHARED_CANVAS_OWNER])).rows[0];
     if (!row) return undefined;
     const path = pathFromRow(row);
     await db.query(`INSERT INTO noema_canvas(owner_id,artwork_id,hidden,transform_json,added_at) VALUES($1,$2,0,$3,$4) ON CONFLICT(owner_id,artwork_id) DO UPDATE SET hidden=0`, [owner,id,path.transform ? JSON.stringify(path.transform) : null,Date.now()]);

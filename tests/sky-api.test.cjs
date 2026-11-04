@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { apiFixture } = require("./durable-api-fixture.cjs");
 const { createTypeScriptLoader } = require("./load-typescript.cjs");
 
-test("durable Sky streams sequential progress, isolates owners, deduplicates and retries failed slots", async t => {
+test("durable public Sky streams sequential progress across devices, deduplicates and retries failed slots", async t => {
   const f = await apiFixture(t);
   const sky = f.load("app/api/skyBatch/route.ts");
   const post = (requestId, extra = {}, user = "a") => f.request("/api/skyBatch", "POST", { requestId, ...extra }, user);
@@ -26,7 +26,7 @@ test("durable Sky streams sequential progress, isolates owners, deduplicates and
   const first = await sky.POST(post("first-request-0001"));
   assert.match(first.headers.get("content-type"), /ndjson/);
   assert.equal((await (await sky.POST(post("first-request-0001"))).json()).reused, true);
-  assert.equal((await sky.POST(post("overlapping-request-01"))).status, 409);
+  assert.equal((await sky.POST(post("overlapping-request-01", {}, "b"))).status, 409);
   const frames = (await first.text()).trim().split("\n").map(JSON.parse);
   assert.equal(calls, 10); assert.equal(peak, 1);
   assert.equal(frames.at(-1).job.status, "complete");
@@ -34,8 +34,10 @@ test("durable Sky streams sequential progress, isolates owners, deduplicates and
   assert.equal(new Set(frames.at(-1).job.entries.map(e => e.agent.id)).size, 3);
   assert.equal((await f.store.listStrokes(f.owner("a"))).length, 11);
   for (let index = 0; index < frames.length; index++) assert.equal(frames[index].job.updateSequence, index);
-  assert.equal((await (await sky.GET(f.request("/api/skyBatch?requestId=first-request-0001", "GET", undefined, "b"))).json()).job, null);
-  assert.equal((await f.store.listStrokes(f.owner("b"))).length, 1);
+  assert.equal((await (await sky.GET(f.request("/api/skyBatch?requestId=first-request-0001", "GET", undefined, "b"))).json()).job.requestId, "first-request-0001");
+  assert.equal((await f.store.listStrokes(f.owner("b"))).length, 11);
+  const anonymous = new Request("http://localhost:3000/api/skyBatch");
+  assert.equal((await (await sky.GET(anonymous)).json()).job.requestId, "first-request-0001");
   assert.equal((await (await sky.POST(post("first-request-0001"))).json()).reused, true);
   assert.equal(calls, 10);
 

@@ -94,9 +94,23 @@ export default function Home() {
   );
 
   useEffect(() => {
-    appStore.bootstrap();
-    const t = setInterval(() => appStore.refresh(), 6000);
-    return () => clearInterval(t);
+    void appStore.bootstrap();
+  }, []);
+
+  useEffect(() => {
+    // Renderer preserves the active local preview, but remote removals/clears
+    // must still reach an editor instead of trapping it behind a failed save.
+    const sync = () => {
+      if (document.visibilityState !== "hidden") void appStore.refresh(true);
+    };
+    const t = setInterval(sync, 3000);
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", sync);
+    };
   }, []);
 
 
@@ -133,6 +147,10 @@ export default function Home() {
     resetCanvasUI();
   }, [resetRevision, resetCanvasUI]);
 
+  useEffect(() => {
+    if (ready && edit.active && edit.selected_stroke_id && !strokes.some(stroke => stroke.id === edit.selected_stroke_id)) resetCanvasUI();
+  }, [ready, edit.active, edit.selected_stroke_id, strokes, resetCanvasUI]);
+
   // ---- edit mode controls ----
   const enterEdit = useCallback(
     (id?: string) => {
@@ -141,6 +159,7 @@ export default function Home() {
       // Geometry editing stays on the original plane. Rotating the sphere is
       // a presentation-only camera gesture, never a persisted stroke edit.
       if (displayMode === "sphere") changeDisplayMode("animated");
+      setTransforms({});
       setUI((s) => ({ ...s, selected_stroke: target }));
       setEdit({ active: true, selected_stroke_id: target });
     },
@@ -152,6 +171,7 @@ export default function Home() {
   // Canvas tab so the user can immediately drag / pinch / rotate it.
   const onRequestEdit = useCallback((id: string) => {
     if (displayMode === "sphere") changeDisplayMode("animated");
+    setTransforms({});
     setUI((s) => ({ ...s, selected_stroke: id, active_mobile_tab: "canvas" }));
     setEdit({ active: true, selected_stroke_id: id });
   }, [displayMode, changeDisplayMode]);
@@ -351,7 +371,7 @@ export default function Home() {
             <div className="brand studio-brand">
               <span className="brand-mark">✦</span>
               <Link href="/" className="studio-home-link">Noema</Link>
-              <span className="brand-sub">EXPERIMENT 001 · AGENT SNAPSHOT</span>
+              <span className="brand-sub">SHARED CANVAS · NO LOGIN</span>
             </div>
             <div className="topbar-actions">
               <Link href="/sky" className="ghost">Sky</Link>
@@ -435,7 +455,7 @@ export default function Home() {
         <div className="modal-overlay" onClick={() => { if (!removing) setConfirmDeleteId(null); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <h3 className="modal-title">Remove from canvas?</h3>
-            <p className="modal-body">Only your canvas changes. This artwork stays saved in the Archive and can be restored.</p>
+            <p className="modal-body">This removes the stroke from the shared canvas for everyone. The original stays saved in the Archive and can be restored.</p>
             <p className="modal-target">
               <b>{confirmStroke.from}</b> → <b>{confirmStroke.to}</b>
             </p>
@@ -452,11 +472,11 @@ export default function Home() {
       {confirmClear && (
         <div className="modal-overlay" onClick={() => { if (!clearing) setConfirmClear(false); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Clear your canvas?</h3>
+            <h3 className="modal-title">Clear the shared canvas?</h3>
             <p className="modal-body">
-              This hides your visible strokes in <b>Agent Snapshot and Sky</b>.
+              This hides the visible strokes in <b>Agent Snapshot and Sky for everyone</b> and stops the current Sky batch.
               Every artwork stays saved in the <Link href="/archive">Archive</Link>, where you can restore it.
-              Your agents and other visitors&apos; canvases are not changed.
+              The shared agent pool is not changed. This does not delete any artwork.
             </p>
             {clearError && <p className="modal-body" role="alert">{clearError}</p>}
             <div className="modal-actions">

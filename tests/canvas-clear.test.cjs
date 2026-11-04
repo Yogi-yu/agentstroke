@@ -2,33 +2,35 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { apiFixture } = require("./durable-api-fixture.cjs");
 
-test("clearing a canvas keeps all works in Archive and affects only its visitor", async t => {
+test("clearing the shared canvas reaches every device and keeps every work in Archive", async t => {
   const f = await apiFixture(t);
   await f.store.addStroke(f.owner("a"), f.stroke("alice-private"));
   await f.store.addStroke(f.owner("b"), f.stroke("bob-private"));
   const strokes = f.load("app/api/strokes/route.ts");
   const archive = f.load("app/api/archive/route.ts");
   const detail = f.load("app/api/strokes/[id]/route.ts");
-  const beforeB = await f.store.listStrokes(f.owner("b"));
   const pool = await f.store.listAgents(f.owner("a"));
   const result = await (await strokes.DELETE(f.request("/api/strokes", "DELETE"))).json();
   assert.equal(result.cleared, true); assert.equal(result.archived, true); assert.equal(result.canvasRevision, 1);
   assert.deepEqual(await f.store.listStrokes(f.owner("a")), []);
-  assert.deepEqual(await f.store.listStrokes(f.owner("b")), beforeB);
+  assert.deepEqual(await f.store.listStrokes(f.owner("b")), []);
+  assert.deepEqual((await (await strokes.GET(new Request("http://localhost:3000/api/strokes"))).json()).strokes, []);
   assert.deepEqual(await f.store.listAgents(f.owner("a")), pool);
   const ownArchive = await (await archive.GET(f.request("/api/archive?limit=1"))).json();
-  assert.equal(ownArchive.total, 2); assert.equal(ownArchive.hasMore, true); assert.equal(ownArchive.strokes.length, 1);
+  assert.equal(ownArchive.total, 3); assert.equal(ownArchive.hasMore, true); assert.equal(ownArchive.strokes.length, 1);
   const all = await (await archive.GET(f.request("/api/archive"))).json();
-  assert.ok(all.strokes.some(s => s.id === "alice-private")); assert.ok(!all.strokes.some(s => s.id === "bob-private"));
-  assert.equal((await archive.POST(f.request("/api/archive", "POST", { id: "bob-private" }))).status, 404);
-  assert.equal((await detail.GET(f.request("/api/strokes/bob-private"), { params: Promise.resolve({ id: "bob-private" }) })).status, 404);
+  assert.ok(all.strokes.some(s => s.id === "alice-private")); assert.ok(all.strokes.some(s => s.id === "bob-private"));
+  assert.equal((await detail.GET(f.request("/api/strokes/bob-private"), { params: Promise.resolve({ id: "bob-private" }) })).status, 200);
   assert.equal((await detail.GET(f.request("/api/strokes/alice-private"), { params: Promise.resolve({ id: "alice-private" }) })).status, 200);
   const restore = await archive.POST(f.request("/api/archive", "POST", { id: "alice-private" }));
   assert.equal(restore.status, 200);
   assert.deepEqual((await f.store.listStrokes(f.owner("a"))).map(s => s.id), ["alice-private"]);
+  assert.deepEqual((await f.store.listStrokes(f.owner("b"))).map(s => s.id), ["alice-private"]);
+  assert.equal((await archive.POST(f.request("/api/archive", "POST", { id: "bob-private" }, "b"))).status, 200);
+  assert.equal((await f.store.listStrokes(f.owner("a"))).length, 2);
 });
 
-test("single hide, transforms and agent removal never mutate another visitor or delete art", async t => {
+test("shared transforms, hides and agent removal reach other devices without deleting art", async t => {
   const f = await apiFixture(t);
   const strokes = f.load("app/api/strokes/route.ts");
   const agents = f.load("app/api/agents/route.ts");
@@ -36,14 +38,14 @@ test("single hide, transforms and agent removal never mutate another visitor or 
   const original = await f.store.getStroke(f.owner("b"), f.seed.id);
   const transform = { translation: { x: .2, y: .3 }, rotation: 1, scale: 2 };
   assert.equal((await strokes.PATCH(f.request("/api/strokes", "PATCH", { id: f.seed.id, transform }))).status, 200);
-  assert.deepEqual((await f.store.getStroke(f.owner("b"), f.seed.id)), original);
+  assert.deepEqual((await f.store.getStroke(f.owner("b"), f.seed.id)), { ...original, transform });
   assert.equal((await strokes.DELETE(f.request(`/api/strokes?id=${f.seed.id}`, "DELETE"))).status, 200);
   assert.ok(await f.store.getStroke(f.owner("a"), f.seed.id));
-  assert.equal((await f.store.listStrokes(f.owner("b"))).length, 1);
+  assert.equal((await f.store.listStrokes(f.owner("b"))).length, 0);
   assert.equal(await f.store.canvasRevision(f.owner("a")), 0);
   assert.equal((await agents.DELETE(f.request("/api/agents", "DELETE"))).status, 200);
   assert.equal((await f.store.listAgents(f.owner("a"))).length, 0);
-  assert.ok((await f.store.listAgents(f.owner("b"))).length > 0);
+  assert.equal((await f.store.listAgents(f.owner("b"))).length, 0);
   assert.equal((await f.store.listArchivedStrokes(f.owner("a"))).total, 1);
 });
 

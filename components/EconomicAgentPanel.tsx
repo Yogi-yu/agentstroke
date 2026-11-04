@@ -181,8 +181,8 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
                   {!disabled && (
                     <button
                       className="econ-del"
-                      title={`Remove ${a.name} from your available agents`}
-                      aria-label={`Remove ${a.name} from your available agents`}
+                      title={`Remove ${a.name} from the shared agent pool`}
+                      aria-label={`Remove ${a.name} from the shared agent pool`}
                       onClick={(e) => { e.preventDefault(); e.stopPropagation(); appStore.dismissStorageError(); setConfirmDelete(a); }}
                     >
                       🗑
@@ -226,8 +226,8 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
-              This removes <b>{confirmDelete.name}</b> ({confirmDelete.occupation}) from your available pool only.
-              All of its strokes stay on your canvas and in the Archive with their original authorship.
+              This removes <b>{confirmDelete.name}</b> ({confirmDelete.occupation}) from the shared agent pool for everyone.
+              All of its strokes stay on the shared canvas and in the Archive with their original authorship.
               You can attract this agent again later.
             </p>
             <StorageNotice />
@@ -254,7 +254,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="clear-agents-title" onClick={(e) => e.stopPropagation()}>
             <h3 id="clear-agents-title" className="modal-title">Clear all agents?</h3>
             <p className="modal-body">
-              This removes all <b>{agents.length}</b> agents from your available pool. All artworks stay on your canvas and in the Archive with their original provenance. Other visitors are not affected, and agents can be attracted again later.
+              This removes all <b>{agents.length}</b> agents from the shared pool for everyone. All artworks stay on the shared canvas and in the Archive with their original provenance. Agents can be attracted again later.
             </p>
             <StorageNotice />
             <div className="modal-actions">

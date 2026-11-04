@@ -195,7 +195,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
-              This removes <b>{agent?.name ?? id}</b> from your available pool only. All artworks remain on your canvas and in the Archive. You can attract this agent again later.
+              This removes <b>{agent?.name ?? id}</b> from the shared available pool for everyone. All artworks remain on the shared canvas and in the Archive. Anyone can attract this agent again later.
             </p>
             <StorageNotice />
             <div className="modal-actions">

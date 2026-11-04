@@ -346,17 +346,18 @@ const PlanarCanvasView = forwardRef<CanvasHandle, Props>(function PlanarCanvasVi
     };
   }, []);
 
-  // structural rebuild on data change → full upload
+  // Reconcile shared transforms on polls and immediately after leaving Edit
+  // Mode. Only the selected active edit keeps its local gesture preview.
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     const store = storeRef.current;
-    store.setData(paths, agents);
+    store.setData(paths, agents, { localEditId: editMode ? selectedStrokeId : null });
     renderer.upload(new Float32Array(0), 0);
     brushDirtyRef.current = true;
     lastStructRev.current = store.structureRevision;
     setTick((t) => t + 1);
-  }, [paths, agents]);
+  }, [paths, agents, editMode, selectedStrokeId]);
 
   // Leaving Edit Mode resets the view to default (scale 1, translate 0,0) so
   // zoom never persists into normal (untransformed) canvas interaction.

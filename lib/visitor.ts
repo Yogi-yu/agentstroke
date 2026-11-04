@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { isSameOriginRequest } from "@/lib/requestOrigin";
+import { SHARED_CANVAS_OWNER } from "@/lib/sharedCanvas";
 
 export const VISITOR_COOKIE = "noema_visitor";
 export const VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 365;
@@ -23,16 +24,16 @@ export function visitorId(request: Request): string {
   return createHash("sha256").update(`noema:${token}`).digest("hex");
 }
 
-/** Never expose connection strings, provider errors or another visitor's ID. */
+/** All site requests use the same public canvas. Legacy cookie helpers above
+ * remain only for migrations; neither cookies nor login gate public access.
+ * Keep the historical wrapper name so every API retains origin/error guards.
+ */
 export async function withVisitor(request: Request, handler: (ownerId: string) => Promise<Response>): Promise<Response> {
   if (!["GET", "HEAD", "OPTIONS"].includes(request.method) && !isSameOriginRequest(request)) {
     return Response.json({ error: "This action must be requested from this site." }, { status: 403 });
   }
-  if (!visitorToken(request)) {
-    return Response.json({ code: "session_required", error: "Open or reload Noema to establish your private canvas session." }, { status: 409, headers: { "Cache-Control": "no-store" } });
-  }
   try {
-    const response = await handler(visitorId(request));
+    const response = await handler(SHARED_CANVAS_OWNER);
     response.headers.set("Cache-Control", "private, no-store, no-transform");
     return response;
   } catch {

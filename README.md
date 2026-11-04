@@ -135,29 +135,39 @@ Node.js 22.13 or newer and must live on persistent local storage. Do not deploy
 that file to Render's ephemeral filesystem. Database credentials and local
 database files must never be committed.
 
-The bundled `wu → you` example initializes a new visitor's visible canvas once.
+The bundled `wu → you` example initializes a brand-new shared canvas once.
 Historical bundled artwork is imported into the Archive, not forced onto every
-canvas. An existing visitor's saved canvas is not reseeded on refresh, process
-restart, or deployment. Each new Sky asks for ten independent agent-authored
-strokes, displaying and saving completed results one by one.
+canvas. The shared canvas is not reseeded on refresh, process restart, or
+deployment. Each new Sky asks for ten independent agent-authored strokes
+(twenty in Sphere Sky), displaying and saving completed results one by one.
 
 There is **no artwork TTL, scheduled clearing, or maximum-history eviction**.
-“Remove from canvas” and “Clear canvas” change only the current visitor's visible
-membership (including its active Sky view). They do not delete artwork records.
+“Remove from canvas” and “Clear canvas” change the shared visible membership
+for everyone (including the active Sky view). They do not delete artwork records.
 Use `/archive` to browse saved originals and restore them. Removing an agent
 from the available pool never deletes that agent's artwork or provenance.
 Failures to save or remove something are surfaced in the UI; failed edits roll
 back to the last confirmed transform instead of claiming success.
 
-An opaque, HttpOnly browser cookie identifies a visitor. Server-side ownership
-checks isolate each visitor's canvas, agents, generations and archive; bundled
-public artworks can be viewed and restored by any visitor. This is anonymous
-browser identity, **not account authentication or cross-device synchronization**.
-Another browser receives a separate canvas. Clearing or losing the cookie can
-lose access to that visitor's private collection, but does not delete its stored
-artworks. Cookie expiration is not a database retention policy. Cross-device
-recovery requires a future account-linking system. Keep database backups as an
-additional safeguard; application retention is not a substitute for backups.
+**One public canvas, no login.** All site APIs resolve to one server-defined
+shared canvas, regardless of cookies, device, or client-supplied owner headers.
+The shared archive includes previously browser-scoped artworks and their original
+agent authorship. The first shared access atomically merges visible legacy canvas
+memberships and saved Sky jobs once; original owner records and canonical artwork
+payloads are preserved. Hidden/archive-only artworks are not automatically placed
+back on the canvas. An unexpired legacy generation lease blocks this migration
+until the old worker finishes, rather than losing later results.
+
+Studio polls visible shared state every three seconds and refreshes on focus.
+Sky loads the latest public batch, even in a new tab or on a different device;
+viewing never triggers a paid generation. Generate/retry still requires an explicit
+action, and only one shared Sky batch can run at a time. All visitors can edit,
+hide, clear, restore, and change the shared agent pool; confirmation dialogs state
+the global impact. Same-origin checks still protect mutation APIs. This is an
+open collaborative exhibition, not a private multi-tenant workspace. Keep database
+backups as an additional safeguard; application retention is not a substitute for
+backups. Local SQLite and production PostgreSQL remain separate databases; use the
+same deployed website URL on every device to share production artwork.
 
 Configure `OPENROUTER_API_KEY` through the hosting provider's secret environment
 settings, never in Git. Existing artwork is viewable without it; model-backed
@@ -204,11 +214,11 @@ UIState { cinematic_mode: boolean; selected_agent: string | null; selected_strok
 | ------ | ---------------------- | -------------------------------------------------- |
 | GET    | `/api/agents`          | Agent identity roster                              |
 | POST   | `/api/generateStroke`  | `{ agent_id?, mode?: "autonomous", canvasRevision? }` → `{ stroke }` |
-| GET    | `/api/strokes`         | Current visitor's visible strokes                 |
+| GET    | `/api/strokes`         | Shared visible strokes, no login required         |
 | DELETE | `/api/strokes`         | Hide visible strokes; retain every archived original |
-| DELETE | `/api/strokes?id=…`    | Hide one stroke from the current visitor's canvas  |
+| DELETE | `/api/strokes?id=…`    | Hide one stroke from the shared canvas for everyone |
 | GET    | `/api/archive?offset=0&limit=30` | Paginated own and public saved artworks      |
-| POST   | `/api/archive`         | `{ id }` → restore an original to this visitor's canvas |
+| POST   | `/api/archive`         | `{ id }` → restore an original to the shared canvas |
 | POST   | `/api/agentChat`       | `{ agent_id, message, history? }` → identity reply |
 
 Legacy `from`/`to` request fields cannot constrain autonomous generation. Only

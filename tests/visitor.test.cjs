@@ -14,12 +14,22 @@ test('opaque visitor identities are stable, high entropy and not client owner he
   assert.notEqual(visitorId(request(a)), visitorId(request(b)));
 });
 
-test('missing, invalid and duplicate tokens cannot silently share a global canvas', async () => {
+test('public canvas works without login, including missing, invalid and old cookies', async () => {
+  const { SHARED_CANVAS_OWNER } = load('lib/sharedCanvas.ts');
   for (const cookie of ['', 'noema_visitor=public', 'noema_visitor=../../etc', `noema_visitor=${'a'.repeat(64)}; noema_visitor=${'b'.repeat(64)}`]) {
     const req = new Request('https://noema.test/api/strokes', { headers: { cookie } });
     assert.equal(visitorToken(req), null);
-    const response = await withVisitor(req, async () => { throw new Error('must not call database'); });
-    assert.equal(response.status, 409);
+    const response = await withVisitor(req, async owner => Response.json({ owner }));
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).owner, SHARED_CANVAS_OWNER);
+  }
+});
+
+test('different devices and spoofed owner headers all read the same shared canvas', async () => {
+  const { SHARED_CANVAS_OWNER } = load('lib/sharedCanvas.ts');
+  for (const token of [newVisitorToken(), newVisitorToken()]) {
+    const response = await withVisitor(request(token, 'GET', { 'x-owner-id': 'a'.repeat(64) }), async owner => Response.json({ owner }));
+    assert.equal((await response.json()).owner, SHARED_CANVAS_OWNER);
   }
 });
 

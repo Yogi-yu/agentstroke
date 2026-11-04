@@ -55,6 +55,8 @@ export default function SkyPage() {
   const lifecycleRef = useRef(0);
   const requestStartedAtRef = useRef(0);
   const presentedCanvasRef = useRef<string | null>(null);
+  const snapshotSequenceRef = useRef(0);
+  const appliedSnapshotRef = useRef(0);
 
   const resetSky = useCallback((revision: number | null) => {
     lifecycleRef.current++;
@@ -126,44 +128,60 @@ export default function SkyPage() {
   const loadSnapshot = useCallback(async () => {
     const epoch = lifecycleRef.current;
     const requested = expectedRequestRef.current;
-    const response = await fetch(`/api/skyBatch${requested ? `?requestId=${encodeURIComponent(requested)}` : ""}`, { cache: "no-store", signal: AbortSignal.timeout(10000) });
+    const sequence = ++snapshotSequenceRef.current;
+    // The server's latest public batch is authoritative on every device. A
+    // remembered browser request must never pin a visitor to an older sky.
+    const response = await fetch("/api/skyBatch", { cache: "no-store", signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new SkyRequestError("Could not read the current sky generation.");
     const data = await response.json();
     // An old latest-job GET may finish after the user has started a new batch.
-    if (mountedRef.current && epoch === lifecycleRef.current && requested === expectedRequestRef.current) {
+    if (mountedRef.current && epoch === lifecycleRef.current && requested === expectedRequestRef.current && sequence > appliedSnapshotRef.current) {
+      appliedSnapshotRef.current = sequence;
       setConfigured(Boolean(data.configured));
       const revision = canvasRevisionOf(data.canvasRevision);
       const previousRevision = canvasRevisionRef.current;
+      if (revision !== null && previousRevision !== null && revision < previousRevision) return;
       if (revision !== null && previousRevision !== null && revision > previousRevision) {
         resetSky(revision);
         publishCanvasReset(revision);
-        return;
       }
       if (revision !== null) {
         canvasRevisionRef.current = revision;
         setCanvasRevision(revision);
       }
       // Cleared or expired requests must remove a retained completed canvas.
-      // A configuration-only read on a fresh visit never imports another sky.
-      if (requested && !data.job) {
+      if (!data.job) {
         // A focus GET can overtake the POST before the server creates its job.
         // Only a newer revision proves a clear while that request is pending.
         if (streamActiveRef.current) {
           setNeedsRecovery(true);
           return;
         }
-        resetSky(revision);
+        if (jobRef.current || expectedRequestRef.current) resetSky(revision);
         return;
       }
-      // A failed-only retry may have completed in another tab. The server
-      // explicitly links it to our saved request, so resume that same sky.
-      if (requested && data.resumedFrom === requested && data.job?.requestId) {
+      if (data.job.requestId !== expectedRequestRef.current) {
+        // A GET can have captured the old latest job before our POST committed
+        // and arrive after the new stream completed. Do not move backwards.
+        if (jobRef.current && data.job.createdAt < jobRef.current.createdAt) return;
+        // A latest-job GET can overtake an as-yet unregistered POST and still
+        // contain the previous completed sky. Wait for the POST's first frame
+        // or definite conflict; never replace a pending request with that sky.
+        const awaitingFirstFrame = streamActiveRef.current && jobRef.current?.requestId !== expectedRequestRef.current;
+        if (awaitingFirstFrame) return;
+        // Another visitor started a newer batch (or a retry). Follow it and
+        // fence late frames from any old transport without starting a POST.
+        requestRef.current?.abort();
+        requestRef.current = null;
+        streamActiveRef.current = false;
+        busyRef.current = false;
+        setRequesting(false);
         expectedRequestRef.current = data.job.requestId;
         rememberRequest(data.job.requestId);
+        jobRef.current = null;
+        setSelectedId(null);
       }
-      // A fresh visit checks configuration only. Resume only a request this
-      // browser session explicitly started, never the server's latest artwork.
-      if (requested) acceptJob(data.job ?? null);
+      acceptJob(data.job);
       if (jobRef.current && jobRef.current.status !== "running") {
         // GET has confirmed completion, so a stalled stream is unnecessary.
         requestRef.current?.abort();
@@ -176,9 +194,8 @@ export default function SkyPage() {
   useEffect(() => {
     mountedRef.current = true;
     setRequesting(false);
-    if (!expectedRequestRef.current) {
-      try { expectedRequestRef.current = sessionStorage.getItem(REQUEST_STORAGE); } catch { /* Optional recovery only. */ }
-    }
+    // Session storage is only an optional last-seen cache, never an identity
+    // or a source of truth. Fresh tabs always load the same public sky.
     const epoch = lifecycleRef.current;
     void loadSnapshot().catch(() => { if (mountedRef.current && epoch === lifecycleRef.current) {
       setError("Could not read the current sky generation. Checking again without repeating generation.");
@@ -213,7 +230,6 @@ export default function SkyPage() {
   // Always reconcile with GET, including before the first frame and while a
   // stream is open: an open connection is not proof that frames are arriving.
   useEffect(() => {
-    if (!job && !needsRecovery && !requesting) return;
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -278,10 +294,12 @@ export default function SkyPage() {
           if (clearedRevision !== null) publishCanvasReset(clearedRevision);
           return;
         }
-        if (data.code === "already_retried" && data.job) {
+        if ((data.code === "already_retried" || data.code === "active") && data.job) {
           expectedRequestRef.current = data.job.requestId;
           rememberRequest(data.job.requestId);
+          jobRef.current = null;
           acceptJob(data.job);
+          if (data.code === "active") setError("Another visitor is generating this shared sky. Following its progress; no duplicate generation was started.");
           return;
         }
         if (!response.ok) {
@@ -358,7 +376,7 @@ export default function SkyPage() {
       </header>
       <div className="sky-content">
         {controlsVisible && <section className="sky-console" aria-label="Star field generation">
-          <div className="sky-heading"><h1>Sky</h1><p>Independent journeys. One shared sky.</p></div>
+          <div className="sky-heading"><h1>Sky</h1><p>The latest public batch. Live across devices. No login.</p></div>
           <div className="sky-generation-modes" role="group" aria-label="Sky generation mode">
             <button type="button" disabled={generationLocked} aria-pressed={skyMode === "standard"} onClick={() => chooseSkyMode("standard")}>
               <strong>Standard sky</strong><span>10 strokes · Open canvas</span>
@@ -371,7 +389,7 @@ export default function SkyPage() {
             <p className="sky-autonomy">Each agent chooses its own starting word, ending word, and wandering steps. One English word per step. Brief and extended journeys create distinctly different stroke lengths.</p>
             <button type="submit" disabled={generationLocked || !configured || canvasRevision === null}>{running ? `Generating ${completed}/${targetCount}` : `Generate ${nextCount} strokes`}</button>
           </form>
-          {!job && !running && <p className="sky-note">Create {nextCount} strokes using your available agents in one request. Each stroke appears as soon as it is ready. No new agents are added.</p>}
+          {!job && !running && <p className="sky-note">Create {nextCount} strokes using the shared agents in one request. Each stroke appears for everyone as soon as it is ready. No new agents are added.</p>}
         </section>}
         {configured === false && <p className="sky-error">Configure OPENROUTER_API_KEY to generate real agent strokes.</p>}
         {error && <p className="sky-error" role="alert">{error}</p>}

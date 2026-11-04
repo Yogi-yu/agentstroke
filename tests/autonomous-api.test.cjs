@@ -31,16 +31,25 @@ test("autonomous endpoints ignore site-provided words and persist the canonical 
   }
 });
 
-test("invalid body, mode, revision, origin and session make no model calls", async t => {
+test("invalid body, mode, revision and foreign origin make no model calls", async t => {
   const f = await setup(t);
   for (const body of [null, [], 3, { mode: "fixed" }, { mode: false }, { mode: null }, { canvasRevision: -1 }, { canvasRevision: "0" }, { agent_id: 0 }]) {
     assert.equal((await f.route.POST(f.post(body))).status, 400, JSON.stringify(body));
   }
   const foreign = f.post({}); foreign.headers.set("origin", "https://evil.example");
   assert.equal((await f.route.POST(foreign)).status, 403);
-  const missing = f.post({}); missing.headers.delete("cookie");
-  assert.equal((await f.route.POST(missing)).status, 409);
   assert.equal(f.calls.length, 0);
+});
+
+test("anonymous generation needs no cookie and becomes visible to another device", async t => {
+  const f = await setup(t);
+  const req = f.post({}); req.headers.delete("cookie");
+  const response = await f.route.POST(req);
+  assert.equal(response.status, 200);
+  const { stroke } = await response.json();
+  const other = await f.load("app/api/strokes/route.ts").GET(f.request("/api/strokes", "GET", undefined, "b"));
+  assert.ok((await other.json()).strokes.some(s => s.id === stroke.id));
+  assert.equal(f.calls.length, 1);
 });
 
 test("simultaneous fixed-example requests restore one public work without paid generation", async t => {

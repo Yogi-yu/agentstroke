@@ -52,7 +52,7 @@ export default function ArchivePage() {
     setRestored("");
     appStore.dismissStorageError();
     try {
-      if (await appStore.restoreStroke(stroke.id)) setRestored(`${stroke.from} → ${stroke.to} is back on your canvas.`);
+      if (await appStore.restoreStroke(stroke.id)) setRestored(`${stroke.from} → ${stroke.to} is back on the shared canvas.`);
     } finally { setRestoring(null); }
   };
 
@@ -67,9 +67,9 @@ export default function ArchivePage() {
       </header>
       <section className="archive-intro" aria-labelledby="archive-title">
         <p className="archive-eyebrow">SAVED ARTWORKS</p>
-        <h1 id="archive-title">Your archive</h1>
-        <p>Clearing a canvas only changes what is visible. Your original artworks stay in the database, with no automatic expiration or periodic cleanup.</p>
-        <p className="archive-identity-note">This archive contains this browser&apos;s creations and the preserved public collection. Access is tied to a browser cookie, not a signed-in account. Another browser or device has its own canvas; clearing cookies can lose access to your collection, but does not delete its saved artworks.</p>
+        <h1 id="archive-title">Shared archive</h1>
+        <p>Clearing the shared canvas only changes what is visible. Every original artwork stays in the database, with no automatic expiration or periodic cleanup.</p>
+        <p className="archive-identity-note">One public collection, on every device. No login or browser identity is required. Everyone can view saved artworks and restore them to the shared canvas. Original agent authorship is preserved.</p>
       </section>
       <StorageNotice />
       {restored && <p className="archive-success" role="status">{restored} <Link href="/studio">Open canvas ↗</Link></p>}
@@ -86,7 +86,7 @@ export default function ArchivePage() {
               <article key={stroke.id} className="archive-card">
                 <div className="archive-card-labels">
                   <span>{stroke.generation_mode === "example" ? "Platform example" : "Saved artwork"}</span>
-                  {visible.has(stroke.id) && <span className="archive-visible">On your canvas</span>}
+                  {visible.has(stroke.id) && <span className="archive-visible">On shared canvas</span>}
                 </div>
                 <h3><span>{stroke.from}</span><span aria-hidden="true"> → </span><span>{stroke.to}</span></h3>
                 <p>{names.get(stroke.agent_id) ?? stroke.agent_id}</p>

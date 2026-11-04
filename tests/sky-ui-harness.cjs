@@ -14,7 +14,7 @@ const batch = (requestId = "remembered-request", revision = 0) => ({
 
 // Tiny hook harness executes the actual SkyPage event/effect code with mocked
 // browser APIs. It never mounts WebGL, reaches a server or calls a model.
-function harness(initialJob = batch()) {
+function harness(initialJob = batch(), options = {}) {
   const originals = Object.fromEntries(["window", "document", "sessionStorage", "CustomEvent", "fetch", "setTimeout", "clearTimeout"].map((key) => [key, globalThis[key]]));
   const scheduledPolls = new Map();
   globalThis.setTimeout = (callback, delay, ...args) => {
@@ -33,7 +33,8 @@ function harness(initialJob = batch()) {
   globalThis.document = document;
   globalThis.sessionStorage = storage();
   globalThis.CustomEvent = class extends Event { constructor(type, options) { super(type); this.detail = options.detail; } };
-  if (initialJob) sessionStorage.setItem("noema:sky-request-id", initialJob.requestId);
+  const rememberedRequest = Object.hasOwn(options, "rememberedRequest") ? options.rememberedRequest : initialJob?.requestId;
+  if (rememberedRequest) sessionStorage.setItem("noema:sky-request-id", rememberedRequest);
   let serverJob = initialJob;
   let revision = initialJob?.canvasRevision ?? 0;
   let getOverride = null;

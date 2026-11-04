@@ -403,3 +403,50 @@ test("a failed archive restoration leaves the current canvas unchanged", async (
   assert.deepEqual(h.store.getSnapshot().strokes, before);
   assert.match(h.store.getSnapshot().storageError, /Could not restore/);
 });
+
+test("public polling loads another device's strokes and agents without restarting unchanged geometry", async t => {
+  const h = harness(t);
+  await h.seed();
+  const same = h.store.getSnapshot().strokes;
+  h.setFetch(({ url }) => url === "/api/agents"
+    ? response({ agents: [agent], capacity: 10 })
+    : response({ strokes: [stroke("existing")], canvasRevision: 4 }));
+  await h.store.refresh(true);
+  assert.equal(h.store.getSnapshot().strokes, same);
+  const remoteAgent = { ...agent, id: "other-device-agent" };
+  const remoteStroke = stroke("other-device-stroke");
+  h.setFetch(({ url }) => url === "/api/agents"
+    ? response({ agents: [agent, remoteAgent], capacity: 10 })
+    : response({ strokes: [stroke("existing"), remoteStroke], canvasRevision: 4 }));
+  await h.store.refresh(true);
+  const updated = h.store.getSnapshot();
+  assert.equal(updated.strokes[0], same[0]);
+  assert.equal(updated.strokes[1].id, remoteStroke.id);
+  assert.equal(updated.agents[1].id, remoteAgent.id);
+  assert.ok(h.calls.every(call => call.method === "GET"));
+});
+
+test("slow public snapshot cannot undo an acknowledged local removal", async t => {
+  const h = harness(t);
+  await h.seed();
+  const pending = deferred();
+  h.setFetch(({ method }) => method === "GET" ? pending.promise : response({ deleted: true }));
+  const reading = h.store.refresh();
+  assert.equal(await h.store.deleteStroke("existing"), true);
+  pending.resolve(response({ strokes: [stroke("existing")], canvasRevision: 4 }));
+  await reading;
+  assert.deepEqual(h.store.getSnapshot().strokes, []);
+});
+
+test("polling a saved result before its POST acknowledgement does not duplicate the stroke", async t => {
+  const h = harness(t);
+  await h.seed(4, []);
+  const pending = deferred();
+  const work = stroke("saved-before-ack");
+  h.setFetch(({ method }) => method === "POST" ? pending.promise : response({ strokes: [work], canvasRevision: 4 }));
+  const generating = h.store.generateAutonomous();
+  await h.store.refresh();
+  pending.resolve(response({ stroke: work, canvasRevision: 4 }));
+  await generating;
+  assert.deepEqual(h.store.getSnapshot().strokes, [work]);
+});

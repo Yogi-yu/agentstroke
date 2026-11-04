@@ -64,7 +64,7 @@ export default function StrokeListPanel({
             className="sl-clear"
             disabled={locked || strokes.length === 0}
             onClick={onClear}
-            title="Clear this canvas; keep all artworks in the archive"
+            title="Clear the shared canvas for everyone; keep all artworks in the archive"
           >
             Clear
           </button>
@@ -73,7 +73,7 @@ export default function StrokeListPanel({
       <div className="card-list" ref={listRef}>
         {ordered.length === 0 && (
           <div className="cards-empty">
-            Your canvas is empty. Restore a saved artwork from the Archive, or open an agent to create a new stroke.
+            The shared canvas is empty. Restore a saved artwork from the Archive, or open an agent to create a new stroke.
           </div>
         )}
         {ordered.map((s) => {

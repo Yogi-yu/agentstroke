@@ -61,10 +61,26 @@ export default function AgentDetailPage() {
   const playerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    appStore.bootstrap();
-    const t = setInterval(() => appStore.refresh(), 6000);
-    return () => clearInterval(t);
+    void appStore.bootstrap();
   }, []);
+
+  useEffect(() => {
+    const reconcile = () => {
+      // A live remote update must not interrupt an in-progress local gesture.
+      if (!editActive && document.visibilityState !== "hidden") void appStore.refresh(true);
+    };
+    const timer = setInterval(reconcile, 6000);
+    window.addEventListener("focus", reconcile);
+    window.addEventListener("pageshow", reconcile);
+    document.addEventListener("visibilitychange", reconcile);
+    if (!editActive) reconcile();
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", reconcile);
+      window.removeEventListener("pageshow", reconcile);
+      document.removeEventListener("visibilitychange", reconcile);
+    };
+  }, [editActive]);
 
   const agent = useMemo(() => agents.find((a) => a.id === id) ?? null, [agents, id]);
   const agentStrokes = useMemo(() => strokes.filter((s) => s.agent_id === id), [strokes, id]);
@@ -341,10 +357,10 @@ export default function AgentDetailPage() {
             />
             <button
               className="btn danger detail-clear"
-              disabled={editActive || agentStrokes.length === 0}
+              disabled={editActive || strokes.length === 0}
               onClick={() => setConfirmClear(true)}
             >
-              Clear canvas ({agentStrokes.length})
+              Clear shared canvas ({strokes.length})
             </button>
           </div>
         </section>
@@ -359,8 +375,8 @@ export default function AgentDetailPage() {
       {confirmStroke && (
         <div className="modal-overlay" onClick={() => { if (!mutating) setConfirmDeleteId(null); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Remove from canvas?</h3>
-            <p className="modal-body">This only hides the stroke from your canvas. Its original stays saved in the Archive and can be restored.</p>
+            <h3 className="modal-title">Remove from shared canvas?</h3>
+            <p className="modal-body">This hides the stroke from the shared Snapshot canvas for everyone. Its original stays saved in the Archive and can be restored.</p>
             <p className="modal-target">
               <b>{confirmStroke.from}</b> → <b>{confirmStroke.to}</b>
             </p>
@@ -379,8 +395,8 @@ export default function AgentDetailPage() {
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
-              This removes <b>{agent?.name ?? id}</b>{agent ? ` (${agent.occupation})` : ""} from your available pool.
-              All artworks stay on your canvas and in the Archive. You can attract this agent again later.
+              This removes <b>{agent?.name ?? id}</b>{agent ? ` (${agent.occupation})` : ""} from the shared available pool for everyone.
+              All artworks stay on the shared canvas and in the Archive. Anyone can attract this agent again later.
             </p>
             <StorageNotice />
             <div className="modal-actions">
@@ -401,14 +417,14 @@ export default function AgentDetailPage() {
         </div>
       )}
 
-      {/* Clear only this visitor's canvas; saved artwork is retained. */}
+      {/* Clearing affects every visitor's shared view; archived artwork stays. */}
       {confirmClear && (
         <div className="modal-overlay" onClick={() => { if (!mutating) setConfirmClear(false); }}>
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
-            <h3 className="modal-title">Clear canvas?</h3>
+            <h3 className="modal-title">Clear shared canvas for everyone?</h3>
             <p className="modal-body">
               This hides all <b>{strokes.length}</b> stroke{strokes.length === 1 ? "" : "s"} from
-              your Snapshot and Sky canvases. All artworks stay in the <Link href="/archive">Archive</Link> and can be restored. Other visitors are not affected.
+              the shared Snapshot and Sky canvases on every device. All artworks stay in the <Link href="/archive">Archive</Link> and can be restored. This affects all visitors.
             </p>
             <StorageNotice />
             <div className="modal-actions">
