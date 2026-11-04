@@ -66,21 +66,21 @@ export default function AgentDetailPage() {
 
   useEffect(() => {
     const reconcile = () => {
-      // A live remote update must not interrupt an in-progress local gesture.
-      if (!editActive && document.visibilityState !== "hidden") void appStore.refresh(true);
+      // The renderer preserves the active local preview. Keep observing remote
+      // clears/removals so a deleted stroke cannot strand this editor.
+      if (document.visibilityState !== "hidden") void appStore.refresh(true);
     };
     const timer = setInterval(reconcile, 6000);
     window.addEventListener("focus", reconcile);
     window.addEventListener("pageshow", reconcile);
     document.addEventListener("visibilitychange", reconcile);
-    if (!editActive) reconcile();
     return () => {
       clearInterval(timer);
       window.removeEventListener("focus", reconcile);
       window.removeEventListener("pageshow", reconcile);
       document.removeEventListener("visibilitychange", reconcile);
     };
-  }, [editActive]);
+  }, []);
 
   const agent = useMemo(() => agents.find((a) => a.id === id) ?? null, [agents, id]);
   const agentStrokes = useMemo(() => strokes.filter((s) => s.agent_id === id), [strokes, id]);
@@ -105,6 +105,21 @@ export default function AgentDetailPage() {
     setPreviewStrokeId(null);
     setEditActive(false);
   }, [id]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const present = new Set(agentStrokes.map(stroke => stroke.id));
+    if (selectedStrokeId && !present.has(selectedStrokeId)) {
+      // Individual removal need not increment the canvas clear revision.
+      // Discard the stale editor and fence a pending transform rollback.
+      transformRequests.current.delete(selectedStrokeId);
+      setSelectedStrokeId(null);
+      setEditActive(false);
+      setTransforms({});
+    }
+    if (previewStrokeId && !present.has(previewStrokeId)) setPreviewStrokeId(null);
+    if (confirmDeleteId && !present.has(confirmDeleteId)) setConfirmDeleteId(null);
+  }, [ready, agentStrokes, selectedStrokeId, previewStrokeId, confirmDeleteId]);
 
   useEffect(() => {
     if (previewStrokeId && !isMobile) playerRef.current?.scrollIntoView({ block: "start", behavior: "instant" });
