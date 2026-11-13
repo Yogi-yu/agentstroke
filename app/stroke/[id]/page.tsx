@@ -177,11 +177,11 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
     highLow: "Materials differ in contour, pressure response, pigment and groove structure—not simply opacity. A genuine zero-length gesture remains a compact point.",
   },
   color_system: {
-    definition: "A seeded random palette distributed continuously and evenly over the travelled length of the stroke.",
+    definition: "A seeded random palette with a persistent bright or muted pigment treatment, distributed evenly over travelled length.",
     geometry: "Color changes pigment only; it never splits or duplicates the one-stroke centerline.",
     motion: "The gradient remains attached to travelled distance as the meteor reveals the route.",
     ranges: "Long stroke + motion <0.35 = 1 color; 0.35–<0.70 = 3; ≥0.70 = 5. Non-long strokes are locked to 1.",
-    highLow: "High motion on a long stroke → five random color stops. Otherwise → one random color.",
+    highLow: "Half of the platform's strokes receive muted, low-saturation charcoal and slate tones. The others retain their bright pigments. Tone is saved per artwork, independent of motion and material; it never rerolls on replay or filtering.",
   },
   draw_speed: {
     definition: "The meteor's travel rhythm, derived from the dwell times recorded along its semantic path.",
@@ -348,7 +348,7 @@ export default function StrokeDetailPage() {
       width_variation: `${signature.width_change_count === 0 ? "This stroke holds pressure at 1× because its stability is below 0.02; its material still shapes the outline." : `This stroke has ${signature.width_change_count} pronounced press/lift transitions: ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}. Its pressure peak-to-valley contrast is ${(Math.max(...signature.width_profile) / Math.min(...signature.width_profile)).toFixed(1)}:1, smoothly interpolated without mean normalization.`} The centerline is unchanged; physical width stays inside the material's 12-pixel cap.`,
       crossings: `Actual centerline crossings: ${actualCrossings}. Maximum permitted: ${crossingBudget}, derived from entropy ${m.entropy.toFixed(2)} and ${signature.length_class} length. ${family} uses only the intersections natural to its complete route; unused budget does not add loops. Counted before bounded corner rounding.`,
       brush_head: `${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} ${signature.brush_style === "calligraphy" ? "The platform assigned this work to the 40% calligraphy mix; its original agent-authored attributes and route remain unchanged." : "This work retains its intensity-selected original material."} The original ${signature.brush_heads.join(" + ")} primitive-head metadata remains inspectable without stamping detached shapes onto the route.`,
-      color_system: `${signature.color_count} seeded-random pigment${signature.color_count === 1 ? " is" : "s are"} used (${hueList}). Stops are equally spaced and interpolated by travelled distance, so refreshes preserve this artwork's palette.`,
+      color_system: `${signature.color_treatment === "muted" ? "Muted pigment: body, highlights and edges use low-saturation grey tones with restrained cool/warm tint." : "Bright pigment: this work retains its original saturated material palette."} ${signature.color_count} seeded-random pigment${signature.color_count === 1 ? " is" : "s are"} used (${hueList}). Stops are equally spaced and interpolated by travelled distance. This saved tone changes color only; the route, pressure, material and timing are unchanged.`,
       draw_speed: `This meteor travels through ${signature.speed_profile.length} phases with relative speed weights ${signature.speed_profile.map((value) => value.toFixed(2)).join(" → ")}, derived from per-anchor dwell times. Each phase covers an equal share of the route; a larger weight takes less time.`,
       drawing_duration: timing ? `${m.duration}ms of recorded dwell and average intensity ${m.intensity.toFixed(2)} produce a ${fmtTime(timing.durationMs)} reveal at 1×. Playback speed changes the viewing rate; the original timing remains part of this stroke.` : "",
       turn_system: `The turn budget is ${motion?.turnBudget ?? signature.turn_count}, interpreted by ${family.toLowerCase()} rather than forced into identical corners. Source angle is ${signature.turn_angle_deg.toFixed(0)}°; sharpness ${signature.turn_sharpness.toFixed(2)} determines bounded local rounding. ${MOTION_EFFECTS[pattern]}`,

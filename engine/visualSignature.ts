@@ -1,6 +1,7 @@
-import type { BrushTreatment, GeometryMode, Mood, MotionModel, StrokeVisualSignature, TransitionPath, TransitionPoint } from "@/lib/types";
+import type { BrushTreatment, GeometryMode, Mood, MotionModel, StrokeColorTreatment, StrokeVisualSignature, TransitionPath, TransitionPoint } from "@/lib/types";
 import { hashStr } from "@/simulation/rng";
 import { buildMotionPath, MOTION_PATTERN_BY_GEOMETRY } from "./motionPattern";
+import { resolveColorTreatment } from "./colorTreatment";
 
 export interface XY { x: number; y: number }
 
@@ -61,6 +62,7 @@ interface SignatureSource {
   motionModel?: MotionModel;
   generationMode?: TransitionPath["generation_mode"];
   brushTreatment?: BrushTreatment;
+  colorTreatment?: StrokeColorTreatment;
 }
 
 /**
@@ -224,6 +226,7 @@ export function createVisualSignature(source: SignatureSource): StrokeVisualSign
     brush_style,
     color_temperature: Number(color_temperature.toFixed(3)),
     color_mode,
+    color_treatment: source.colorTreatment ?? "bright",
     color_count,
     color_hues,
     hue_start: Number(hue_start.toFixed(2)),
@@ -260,6 +263,7 @@ export function resolveVisualSignature(path: TransitionPath, baseHue = 210): Str
     motionModel: path.motion_model,
     generationMode: path.generation_mode,
     brushTreatment: path.brush_treatment,
+    colorTreatment: resolveColorTreatment(path),
   });
 }
 

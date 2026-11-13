@@ -67,7 +67,9 @@ test('cold startup loads the single example, with no running or completed Sky ba
   assert.equal(await sky.readSkyBatch(owner), null);
   assert.equal(await sky.canvasRevision(owner), 0);
   assert.deepEqual(await store.listAgents(owner), snapshot.agents);
-  assert.deepEqual(await store.listStrokes(owner), snapshot.strokes);
+  const visible=await store.listStrokes(owner);
+  assert.ok(visible.every(stroke=>stroke.color_treatment==='bright'||stroke.color_treatment==='muted'));
+  assert.deepEqual(visible.map(({color_treatment,...source})=>source),snapshot.strokes);
 });
 
 test('canonical data is immutable and clearing never silently restores the example after restart', async t => {

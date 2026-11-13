@@ -1,5 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { initializeColorTreatments } from "@/lib/colorTreatmentStore";
 
 export interface QueryResult<T> { rows: T[]; rowCount: number }
 export interface DatabaseClient {
@@ -21,6 +22,8 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS noema_sky_jobs (owner_id TEXT NOT NULL REFERENCES noema_visitors(owner_id), request_id TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, lease_id TEXT, lease_until BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY(owner_id, request_id))`,
   `CREATE INDEX IF NOT EXISTS noema_sky_owner_status ON noema_sky_jobs(owner_id, status, lease_until)`,
   `CREATE TABLE IF NOT EXISTS noema_legacy_snapshots (id TEXT PRIMARY KEY, source TEXT NOT NULL, content_sha256 TEXT NOT NULL, payload TEXT NOT NULL, created_at BIGINT NOT NULL, UNIQUE(source,content_sha256))`,
+  `CREATE TABLE IF NOT EXISTS noema_artwork_colors (artwork_id TEXT PRIMARY KEY REFERENCES noema_artworks(id), treatment TEXT NOT NULL CHECK(treatment IN ('bright','muted')), assigned_at BIGINT NOT NULL)`,
+  `CREATE TABLE IF NOT EXISTS noema_color_state (id TEXT PRIMARY KEY, initialized INTEGER NOT NULL DEFAULT 0, next_sequence BIGINT NOT NULL DEFAULT 0)`,
 ];
 
 async function openDatabase(): Promise<DatabaseHandle> {
@@ -111,7 +114,7 @@ export async function databaseTransaction<T>(action: (client: DatabaseClient) =>
     handle = openDatabase(); handles.set(key, handle);
     handle.catch(() => { if (handles.get(key) === handle) handles.delete(key); });
   }
-  return (await handle).transaction(action);
+  return (await handle).transaction(async db => { await initializeColorTreatments(db); return action(db); });
 }
 
 /** Test/maintenance shutdown; application data remains on disk or in Postgres. */

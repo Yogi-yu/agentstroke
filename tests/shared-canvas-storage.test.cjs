@@ -60,7 +60,9 @@ test('public namespace merges visible canvases once, preserves archives/provenan
 
 test('brand new public database gets one example, while a deliberately empty legacy canvas remains empty', async t => {
   const {store,shared} = fixture(t);
-  assert.deepEqual(await store.listStrokes(shared),published.strokes);
+  const visible=await store.listStrokes(shared);
+  assert.ok(visible.every(stroke=>stroke.color_treatment==='bright'||stroke.color_treatment==='muted'));
+  assert.deepEqual(visible.map(({color_treatment,...source})=>source),published.strokes);
   await store.clearStrokes(shared);
   assert.deepEqual(await store.listStrokes(shared),[]);
 });

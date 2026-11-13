@@ -175,6 +175,7 @@ export const MOTION_MODELS: MotionModel[] = [
 /** Brush-head primitives used by the moving drawing head. */
 export type BrushHeadShape = "round" | "square" | "diamond" | "triangle" | "ring" | "organic";
 export type StrokeColorMode = "monochrome" | "duotone" | "spectrum";
+export type StrokeColorTreatment = "bright" | "muted";
 export type StrokeLengthClass = "short" | "medium" | "long";
 export type BrushStrokeStyle = "hard" | "soft" | "watercolor" | "texture" | "calligraphy";
 export type BrushTreatment = "original" | "calligraphy";
@@ -210,6 +211,8 @@ export interface StrokeVisualSignature {
   /** -1 = cold, 0 = neutral, +1 = warm. */
   color_temperature: number;
   color_mode: StrokeColorMode;
+  /** Persistent pigment-only tone; never changes path, pressure or timing. */
+  color_treatment?: StrokeColorTreatment;
   /** Number of evenly spaced random pigments: 1, 3 or 5. */
   color_count: 1 | 3 | 5;
   /** Seeded random hues in degrees; stable for this stroke. */
@@ -267,6 +270,8 @@ export interface TransitionPath {
   anchor_format?: "single_word";
   /** Persisted instrument allocation; never changes with filtering or replay. */
   brush_treatment?: BrushTreatment;
+  /** Stable public appearance allocation; original authored payload is retained. */
+  color_treatment?: StrokeColorTreatment;
   motion_type: MotionType;
   created_at: number;
   /** Back-compat alias of created_at used by the geometry sorter. */

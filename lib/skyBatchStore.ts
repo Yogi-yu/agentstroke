@@ -2,6 +2,13 @@ import { randomUUID } from "node:crypto";
 import { databaseTransaction, type DatabaseClient } from "@/lib/database";
 import { ensureVisitor, saveStrokeInTransaction, type VisitorRow } from "@/lib/store";
 import { touchSkyBatch, type SkyBatch } from "@/lib/skyBatch";
+import { withArtworkColors } from "@/lib/colorTreatmentStore";
+
+async function withSkyColors(db: DatabaseClient, job: SkyBatch): Promise<SkyBatch> {
+  const strokes = await withArtworkColors(db,job.entries.flatMap(entry=>entry.stroke ? [entry.stroke] : []));
+  const byId = new Map(strokes.map(stroke=>[stroke.id,stroke]));
+  return { ...job, entries:job.entries.map(entry=>entry.stroke ? { ...entry,stroke:byId.get(entry.stroke.id)!,colorTreatment:byId.get(entry.stroke.id)!.color_treatment ?? entry.colorTreatment } : entry) };
+}
 
 export { canvasRevision } from "@/lib/store";
 export const SKY_LEASE_MS = 90_000;
@@ -20,7 +27,7 @@ async function follow(db: DatabaseClient, owner: string, row: JobRow): Promise<S
     if (!successor) break;
     job = JSON.parse(successor.payload) as SkyBatch;
   }
-  return job;
+  return withSkyColors(db,job);
 }
 function interrupted(job: SkyBatch): SkyBatch {
   const now = Date.now();
@@ -71,15 +78,15 @@ export async function claimSkyBatch(owner: string, proposed: SkyBatch, options: 
     if (options.retryOf) {
       const previous = await rowFor(db,owner,options.retryOf);
       if (!previous) return {job:null,claimed:false,code:"invalid_retry"};
-      source = JSON.parse(previous.payload) as SkyBatch;
+      source = await withSkyColors(db,JSON.parse(previous.payload) as SkyBatch);
       if (source.retryRequestId) return {job:await follow(db,owner,previous),claimed:false,code:"already_retried"};
       if (source.status === "cleared" || Number(previous.revision) !== revision) return {job:source,claimed:false,code:"canvas_cleared"};
       if (source.status === "running" || !source.entries.some(entry => entry.status === "failed")) return {job:source,claimed:false,code:"invalid_retry"};
     }
     const active = (await db.query<JobRow>("SELECT * FROM noema_sky_jobs WHERE owner_id=$1 AND status='running' ORDER BY created_at DESC LIMIT 1", [owner])).rows[0];
-    if (active) return {job:JSON.parse(active.payload) as SkyBatch,claimed:false,code:"active"};
+    if (active) return {job:await withSkyColors(db,JSON.parse(active.payload) as SkyBatch),claimed:false,code:"active"};
     const now = Date.now(); const leaseId = randomUUID();
-    const job = structuredClone(proposed); job.canvasRevision = revision;
+    const job = await withSkyColors(db,structuredClone(proposed)); job.canvasRevision = revision;
     await db.query("INSERT INTO noema_sky_jobs(owner_id,request_id,payload,status,revision,lease_id,lease_until,created_at,updated_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)", [owner,job.requestId,JSON.stringify(job),job.status,revision,leaseId,now+SKY_LEASE_MS,job.createdAt,now]);
     if (source) {
       source.retryRequestId = job.requestId; touchSkyBatch(source,now);

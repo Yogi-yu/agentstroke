@@ -1,5 +1,6 @@
-import type { AgentProfile, BrushTreatment, TransitionPath } from "@/lib/types";
+import type { AgentProfile, BrushTreatment, StrokeColorTreatment, TransitionPath } from "@/lib/types";
 import { assignBrushTreatment, brushTreatmentForIndex } from "@/engine/brushAssignment";
+import { colorTreatmentForIndex } from "@/engine/colorTreatment";
 import { hashStr } from "@/simulation/rng";
 
 export const SKY_BATCH_SIZE = 10;
@@ -23,6 +24,8 @@ export interface SkyBatchEntry {
   agent: AgentProfile;
   /** Reserved before generation, so failures/retries cannot reroll the mix. */
   brushTreatment?: BrushTreatment;
+  /** Reserved pigment family: half of a complete Sky is muted, even on retry. */
+  colorTreatment?: StrokeColorTreatment;
   status: "queued" | "running" | "succeeded" | "failed";
   stroke?: TransitionPath;
   error?: string;
@@ -92,7 +95,7 @@ export function createSkyBatch(id: string, requestId: string, agents: AgentProfi
   }
   const now = Date.now();
   const materialSeed = hashStr(requestId);
-  return { id, requestId, mode: "autonomous", skyMode, targetCount, from: "", to: "", createdAt: now, updatedAt: now, updateSequence: 0, status: "running", entries: agents.map((agent, index) => ({ agent, brushTreatment: brushTreatmentForIndex(index, materialSeed), status: "queued" })) };
+  return { id, requestId, mode: "autonomous", skyMode, targetCount, from: "", to: "", createdAt: now, updatedAt: now, updateSequence: 0, status: "running", entries: agents.map((agent, index) => ({ agent, brushTreatment: brushTreatmentForIndex(index, materialSeed), colorTreatment: colorTreatmentForIndex(index, materialSeed), status: "queued" })) };
 }
 
 /** Shared by state changes, including the canvas-reset owner. Never resets a sequence. */
@@ -115,7 +118,7 @@ export function retrySkyBatch(source: SkyBatch, id: string, requestId: string): 
     from: "", to: "", createdAt: now, updatedAt: now, updateSequence: 0, status: "running",
     entries: source.entries.map((entry, index) => entry.status === "succeeded"
       ? { ...entry }
-      : { agent: entry.agent, brushTreatment: entry.brushTreatment ?? brushTreatmentForIndex(index, hashStr(source.requestId)), status: "queued" }),
+      : { agent: entry.agent, brushTreatment: entry.brushTreatment ?? brushTreatmentForIndex(index, hashStr(source.requestId)), colorTreatment: entry.colorTreatment ?? colorTreatmentForIndex(index, hashStr(source.requestId)), status: "queued" }),
   };
 }
 
@@ -199,6 +202,7 @@ export async function runSkyBatch(batch: SkyBatch, dependencies: Dependencies, o
           throw new Error("Invalid semantic stroke returned by model generation.");
         }
         assignBrushTreatment(stroke, entry.brushTreatment ?? brushTreatmentForIndex(index, hashStr(batch.requestId)));
+        stroke.color_treatment = entry.colorTreatment ?? colorTreatmentForIndex(index, hashStr(batch.requestId));
         generated = stroke;
       } catch (error) {
         await flush();

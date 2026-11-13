@@ -19,6 +19,10 @@ function fixture(t) {
 }
 function stroke(id) { return {...structuredClone(published.strokes[0]),id,created_at:Date.now(),brush_treatment:undefined}; }
 function batchJob(batch,id) { return batch.createSkyBatch(id,id,Array.from({length:10},(_,i)=>published.agents[i])); }
+function withoutPalette(work) {
+  assert.ok(work.color_treatment==='bright'||work.color_treatment==='muted','response has a persisted pigment family');
+  const copy=structuredClone(work);delete copy.color_treatment;return copy;
+}
 
 test('durable file preserves immutable works, personal transforms, agents and cleared canvas across a real process restart', async t => {
   const {store,database,file} = fixture(t);
@@ -67,6 +71,7 @@ test('canonical artwork never changes on duplicate save; personal transform and 
   const {store,database,load} = fixture(t);
   await store.clearStrokes(A);
   const saved = await store.addStroke(A,stroke('immutable'));
+  const originalPayload=(await database.databaseTransaction(db=>db.query('SELECT payload FROM noema_artworks WHERE id=$1',[saved.id]))).rows[0].payload;
   const changed = {...structuredClone(saved),from:'different',brush_treatment:'calligraphy'};
   changed.points[0].anchor='different';
   assert.deepEqual(await store.addStroke(A,changed),saved);
@@ -77,7 +82,8 @@ test('canonical artwork never changes on duplicate save; personal transform and 
   assert.equal((await store.listStrokes(A)).length,0,'retry must not undo a deliberate hide');
   assert.deepEqual(await store.restoreStroke(A,saved.id),{...saved,transform});
   const canonical = await database.databaseTransaction(db=>db.query('SELECT payload FROM noema_artworks WHERE id=$1',[saved.id]));
-  assert.deepEqual(JSON.parse(canonical.rows[0].payload),saved);
+  assert.equal(canonical.rows[0].payload,originalPayload,'appearance overlay never rewrites canonical bytes');
+  assert.deepEqual(JSON.parse(canonical.rows[0].payload),withoutPalette(saved));
   const sequence = await database.databaseTransaction(db=>db.query('SELECT brush_sequence FROM noema_visitors WHERE owner_id=$1',[A]));
   assert.equal(sequence.rows[0].brush_sequence,1);
   await database.closeDatabases();
@@ -113,9 +119,9 @@ test('public legacy import is idempotent, archived only, and preserves exact his
   const old=stroke('public-legacy'); const author={...published.agents[0],id:old.agent_id,name:'Historical identity'};
   assert.equal(await store.importArchivedStrokes([old],{source:'backup',agents:[author]}),1);
   assert.equal(await store.importArchivedStrokes([old],{source:'backup',agents:[author]}),0);
-  assert.deepEqual(await store.listStrokes(A),published.strokes);
+  assert.deepEqual((await store.listStrokes(A)).map(withoutPalette),published.strokes);
   assert.equal((await store.listArchivedStrokes(B)).total,2);
-  assert.deepEqual(await store.restoreStroke(A,old.id),JSON.parse(JSON.stringify(old)));
+  assert.deepEqual(withoutPalette(await store.restoreStroke(A,old.id)),JSON.parse(JSON.stringify(old)));
   const row=await database.databaseTransaction(db=>db.query('SELECT agent_json FROM noema_artworks WHERE id=$1',[old.id]));
   assert.deepEqual(JSON.parse(row.rows[0].agent_json),author);
 });
@@ -128,7 +134,7 @@ test('complete legacy snapshots preserve original bytes, jobs and provenance wit
   assert.deepEqual(await store.importArchivedSnapshot(raw,{source:'original-release'}),{id:first.id,inserted:false});
   const row=await database.databaseTransaction(db=>db.query('SELECT payload FROM noema_legacy_snapshots WHERE id=$1',[first.id]));
   assert.equal(row.rows[0].payload,raw);
-  assert.deepEqual(await store.listStrokes(A),published.strokes);
+  assert.deepEqual((await store.listStrokes(A)).map(withoutPalette),published.strokes);
   assert.equal(await sky.readSkyBatch(A),null);
 });
 

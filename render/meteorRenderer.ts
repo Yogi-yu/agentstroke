@@ -3,6 +3,7 @@ import type { StrokeStore } from "@/state/strokeStore";
 import type { CanvasTransformState } from "@/store/canvasTransform";
 import { resolveVisualSignature, sampleWidthProfile } from "@/engine/visualSignature";
 import { hashStr } from "@/simulation/rng";
+import { pigmentHsl } from "@/engine/colorTreatment";
 import { ANIMATED_TRAIL_RETENTION, animatedTrailOpacity, animatedTrailStart, clampTrailRetention } from "@/engine/meteorTrail";
 
 /** A surface adapter may relocate controls without mutating an archived work. */
@@ -406,10 +407,10 @@ export class MeteorRenderer {
         ny: dx / distance,
         pressure,
         texture,
-        color: `hsl(${pigment.toFixed(1)} ${signature.brush_style === "calligraphy" ? 68 : 82}% ${faceLightness.toFixed(2)}%)`,
-        core: `hsl(${pigment.toFixed(1)} 61% ${(config.highlightLightness + pigmentVariation * 0.4).toFixed(2)}%)`,
-        rim: `hsl(${pigment.toFixed(1)} 88% ${(config.rimLightness + pigmentVariation * 0.55).toFixed(2)}%)`,
-        groove: `hsl(${pigment.toFixed(1)} 52% ${config.grooveLightness}%)`,
+        color: pigmentHsl(pigment, signature.brush_style === "calligraphy" ? 68 : 82, faceLightness, signature.color_treatment),
+        core: pigmentHsl(pigment, 61, config.highlightLightness + pigmentVariation * 0.4, signature.color_treatment),
+        rim: pigmentHsl(pigment, 88, config.rimLightness + pigmentVariation * 0.55, signature.color_treatment),
+        groove: pigmentHsl(pigment, 52, config.grooveLightness, signature.color_treatment),
       };
     });
     const geometry = { controls, path, hue, samples, length, signature };

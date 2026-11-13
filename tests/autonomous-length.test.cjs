@@ -104,7 +104,10 @@ test("display resolver retains authored length mode and ignores stale stored vis
     geometry_mode: "spiral", motion_model: "continuous", generation_mode: "autonomous",
     visual_signature: { length: 1, length_class: "short" },
   };
-  assert.deepEqual(resolveVisualSignature(path, 210), expected);
+  for (const colorTreatment of ["bright", "muted"]) {
+    assert.deepEqual(resolveVisualSignature({ ...path, color_treatment: colorTreatment }, 210),
+      createVisualSignature({ ...input, colorTreatment }));
+  }
   assert.equal(resolveVisualSignature({ ...path, generation_mode: "example" }, 210).length, expected.length);
   assert.notEqual(resolveVisualSignature({ ...path, generation_mode: undefined }, 210).length, expected.length);
 });
