@@ -5,12 +5,19 @@ import { resolveVisualSignature, sampleWidthProfile } from "@/engine/visualSigna
 import { hashStr } from "@/simulation/rng";
 import { createNaturalPigment, pigmentHsl, sampleNaturalPigment } from "@/engine/colorTreatment";
 import { ANIMATED_TRAIL_RETENTION, animatedTrailOpacity, animatedTrailStart, clampTrailRetention } from "@/engine/meteorTrail";
+import { resolveBrushHeadProfile } from "@/engine/brushHeadProfile";
+import { normalizeBrushHead, placeBrushHead, interpolateBrushHeadPose, buildBrushHeadSweep, appendBrushHeadSweep, simplifyBrushHeadPoses, type NibPoint, type BrushHeadPose } from "@/engine/brushHeadSweep";
+import { NibRasterCache, splitNibTiles } from "@/render/nibRasterCache";
+import { sampleMeteorCenterline } from "@/engine/meteorCenterline";
+export { sampleMeteorCenterline } from "@/engine/meteorCenterline";
 
 /** A surface adapter may relocate controls without mutating an archived work. */
 export type MeteorStrokeSource = Pick<StrokeStore, "controlPointsOf" | "transformOf">;
 
 interface Point { x: number; y: number }
 interface MeteorSample extends Point {
+  /** Actual cumulative travelled distance, not sample-array position. */
+  progress: number;
   nx: number;
   ny: number;
   pressure: number;
@@ -27,9 +34,14 @@ interface MeteorGeometry {
   samples: MeteorSample[];
   length: number;
   signature: StrokeVisualSignature;
+  nib: readonly NibPoint[];
+  nibBearing: { nx: number; ny: number };
 }
 
 interface RibbonNode extends Point {
+  /** Physical nib frame is independent of the direction of travel. */
+  nibNx?: number;
+  nibNy?: number;
   nx: number;
   ny: number;
   width: number;
@@ -40,6 +52,10 @@ interface RibbonNode extends Point {
   texture: BrushTextureSample;
   progress: number;
 }
+
+interface RasterTile { key: string; start: number; end: number; x: number; y: number; width: number; height: number }
+interface RasterWork { geometry: MeteorGeometry; key: string; nodes: RibbonNode[]; tiles: RasterTile[]; zoom: number; retainTrace: boolean }
+interface NodeCapture { nodes: RibbonNode[]; retainTrace: boolean }
 
 export interface BrushMaterialConfig {
   surface: "cut-face" | "ink-belly" | "wet-sediment" | "dry-fibers" | "split-ink";
@@ -239,6 +255,10 @@ export function sampleBrushMaterial(
 }
 
 export interface MeteorRenderOptions {
+  /** Persistent exact contact outline while the animation/player is shown. */
+  showNib?: boolean;
+  /** A labeled enlarged view of the SAME contact; never baked into the art. */
+  inspectNib?: boolean;
   /** Detail / edit views keep an inspectable trace of the travelled path. */
   retainTrace?: boolean;
   /** Animated trail retention fraction; live display-only preference, 0.2–0.8. */
@@ -262,83 +282,12 @@ function hueAt(hues: number[], progress: number): number {
 }
 
 /**
- * Round inside each control-point triangle. Unlike an unconstrained spline,
- * these quadratic joins cannot overshoot a reversal and invent an extra arm.
- * Returned samples are evenly spaced by arc length and include both endpoints.
- */
-export function sampleMeteorCenterline(
-  controls: readonly Point[],
-  width: number,
-  height: number,
-  sharpness = 0,
-): { points: Point[]; length: number } {
-  const source: Point[] = [];
-  for (const control of controls) {
-    if (!Number.isFinite(control.x) || !Number.isFinite(control.y)) continue;
-    const point = { x: control.x * width, y: control.y * height };
-    const last = source[source.length - 1];
-    if (!last || Math.hypot(point.x - last.x, point.y - last.y) > 0.0001) source.push(point);
-  }
-  if (source.length < 2) return { points: source, length: 0 };
-  const dense: Point[] = [source[0]];
-  const rounding = mix(0.36, 0.12, clamp(sharpness, 0, 1));
-  for (let i = 1; i < source.length - 1; i++) {
-    const before = source[i - 1];
-    const point = source[i];
-    const after = source[i + 1];
-    const incoming = Math.hypot(point.x - before.x, point.y - before.y);
-    const outgoing = Math.hypot(after.x - point.x, after.y - point.y);
-    const radius = Math.min(incoming, outgoing) * rounding;
-    const entry = {
-      x: mix(point.x, before.x, radius / incoming),
-      y: mix(point.y, before.y, radius / incoming),
-    };
-    const exit = {
-      x: mix(point.x, after.x, radius / outgoing),
-      y: mix(point.y, after.y, radius / outgoing),
-    };
-    dense.push(entry);
-    const steps = clamp(Math.ceil(radius / 2), 3, 10);
-    for (let j = 1; j <= steps; j++) {
-      const t = j / steps;
-      const u = 1 - t;
-      dense.push({
-        x: u * u * entry.x + 2 * u * t * point.x + t * t * exit.x,
-        y: u * u * entry.y + 2 * u * t * point.y + t * t * exit.y,
-      });
-    }
-  }
-  dense.push(source[source.length - 1]);
-  const distances = [0];
-  for (let i = 1; i < dense.length; i++) {
-    distances.push(distances[i - 1] + Math.hypot(dense[i].x - dense[i - 1].x, dense[i].y - dense[i - 1].y));
-  }
-  const length = distances[distances.length - 1];
-  if (length < 0.0001) return { points: [source[0]], length: 0 };
-  // A fixed upper bound keeps a busy sky cheap; pressure is sampled separately
-  // and densely enough to retain even an eight-phase width profile.
-  const segments = clamp(Math.ceil(length / 2.5), 32, 256);
-  const points: Point[] = [];
-  let cursor = 1;
-  for (let i = 0; i <= segments; i++) {
-    const distance = (i / segments) * length;
-    while (cursor < distances.length - 1 && distances[cursor] < distance) cursor++;
-    const local = (distance - distances[cursor - 1]) / Math.max(0.00001, distances[cursor] - distances[cursor - 1]);
-    points.push({
-      x: mix(dense[cursor - 1].x, dense[cursor].x, local),
-      y: mix(dense[cursor - 1].y, dense[cursor].y, local),
-    });
-  }
-  return { points, length };
-}
-
-/**
- * A deterministic luminous ribbon. The playback layer supplies travelled
- * distance; no wall-clock noise, brush stamps, particles or secondary paths
- * are added here, so replaying and scrubbing produce the same exact frame.
+ * A deterministic swept nib. The playback layer supplies travelled distance;
+ * the attribute-shaped head is swept continuously, never emitted as separate
+ * particles. Replay and scrubbing produce the same exact footprint.
  */
 export class MeteorRenderer {
-  private readonly context: CanvasRenderingContext2D;
+  private context: CanvasRenderingContext2D;
   private width = 1;
   private height = 1;
   private dpr = 1;
@@ -348,12 +297,33 @@ export class MeteorRenderer {
   private agentsReference: Agent[] | null = null;
   private agentsById = new Map<string, Agent>();
   private visible: VisibleMeteor[] = [];
+  private activeNib: readonly NibPoint[] = [];
+  private lastFrameKey = "";
+  private lastFramePaths: TransitionPath[] | null = null;
+  private lastFrameAgents: Agent[] | null = null;
+  private lastFrameControls: (readonly Point[])[] = [];
+  private readonly raster: NibRasterCache;
+  private readonly rasterEnabled: boolean;
+  private rasterWorks = new Map<string, RasterWork>();
+  private scratch: HTMLCanvasElement | null = null;
+  private contactLens: HTMLCanvasElement | null = null;
+  private rasterSerial = 0;
+  private metrics = { frameMs: 0, tileBakes: 0, spriteDraws: 0, frameTileBakes: 0, frameSpriteDraws: 0 };
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
+  constructor(private readonly canvas: HTMLCanvasElement, options: { createCanvas?: (width: number, height: number) => HTMLCanvasElement | null; disableRasterCache?: boolean } = {}) {
     const context = canvas.getContext("2d", { alpha: true });
     if (!context) throw new Error("Noema requires a Canvas 2D context for its meteor layer.");
     this.context = context;
+    const owner = canvas.ownerDocument;
+    this.rasterEnabled = !options.disableRasterCache && (!!options.createCanvas || !!owner?.createElement);
+    this.raster = new NibRasterCache(options.createCanvas ?? ((width, height) => {
+      if (!owner?.createElement) return null;
+      const tile = owner.createElement("canvas"); tile.width = width; tile.height = height;
+      return tile;
+    }));
   }
+
+  getRenderStats() { return { ...this.metrics, ...this.raster.stats }; }
 
   resize(cssWidth: number, cssHeight: number, dpr: number): void {
     const width = Math.max(1, cssWidth);
@@ -368,6 +338,8 @@ export class MeteorRenderer {
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
     this.cache.clear();
+    this.raster.clear(); this.rasterWorks.clear();
+    this.lastFrameKey = "";
   }
 
   private geometry(path: TransitionPath, store: MeteorStrokeSource): MeteorGeometry {
@@ -380,13 +352,22 @@ export class MeteorRenderer {
     const naturalPigment = signature.color_treatment === "muted" ? createNaturalPigment(path.id, signature.color_count) : null;
     const materialSeed = path.variation_seed ?? path.base_seed ?? hashStr(path.id);
     const { points, length } = sampleMeteorCenterline(controls, this.width, this.height, signature.turn_sharpness);
+    const firstDx = (points[1]?.x ?? points[0]?.x ?? 0) - (points[0]?.x ?? 0);
+    const firstDy = (points[1]?.y ?? points[0]?.y ?? 0) - (points[0]?.y ?? 0);
+    const firstLength = Math.hypot(firstDx, firstDy);
+    // Hold the actual polygon like a physical nib; changing travel direction
+    // must not automatically spin it and round every corner into a tube.
+    const nibBearing = firstLength > 1e-10
+      ? { nx: -firstDy / firstLength, ny: firstDx / firstLength } : { nx: 0, ny: 1 };
+    let travelled = 0;
     const samples: MeteorSample[] = points.map((point, index) => {
       const before = points[Math.max(0, index - 1)];
       const after = points[Math.min(points.length - 1, index + 1)];
       const dx = after.x - before.x;
       const dy = after.y - before.y;
       const distance = Math.max(0.0001, Math.hypot(dx, dy));
-      const progress = index / Math.max(1, points.length - 1);
+      if (index) travelled += Math.hypot(point.x - before.x, point.y - before.y);
+      const progress = length > 0 ? clamp(travelled / length, 0, 1) : 0;
       const pigment = hueAt(signature.color_hues, progress);
       const pressure = signature.width_change_count === 0 ? 1 : sampleWidthProfile(signature.width_profile, progress);
       const sourcePosition = progress * Math.max(0, path.points.length - 1);
@@ -410,6 +391,7 @@ export class MeteorRenderer {
       };
       return {
         ...point,
+        progress,
         nx: -dy / distance,
         ny: dx / distance,
         pressure,
@@ -417,7 +399,8 @@ export class MeteorRenderer {
         ...paint,
       };
     });
-    const geometry = { controls, path, hue, samples, length, signature };
+    const nib = normalizeBrushHead(resolveBrushHeadProfile(path));
+    const geometry = { controls, path, hue, samples, length, signature, nib, nibBearing };
     this.cache.set(path.id, geometry);
     return geometry;
   }
@@ -433,15 +416,17 @@ export class MeteorRenderer {
     progressById: ReadonlyMap<string, number>,
     options: MeteorRenderOptions = {},
   ): void {
+    const frameStart = performance.now();
+    this.metrics.frameTileBakes = 0; this.metrics.frameSpriteDraws = 0;
     const ctx = this.context;
-    this.visible.length = 0;
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     if (paths !== this.pathsReference) {
       this.pathsReference = paths;
       this.ordered = [...paths].sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id));
       const retained = new Set(paths.map((path) => path.id));
       for (const id of this.cache.keys()) if (!retained.has(id)) this.cache.delete(id);
+      for (const [id, work] of this.rasterWorks) if (!retained.has(id)) {
+        this.raster.deletePrefix(work.key); this.rasterWorks.delete(id);
+      }
     }
     if (agents !== this.agentsReference) {
       this.agentsReference = agents;
@@ -449,12 +434,34 @@ export class MeteorRenderer {
     }
     ctx.globalCompositeOperation = "source-over";
     const trailRetention = clampTrailRetention(options.trailRetention ?? ANIMATED_TRAIL_RETENTION);
+    // Static canvases and paused detail players retain their exact raster.
+    // The sphere can rotate that atlas without rebuilding every brush polygon.
+    // Include authored controls and every display input; no time-dependent
+    // state is hidden from replay/scrub invalidation.
+    const controls = this.ordered.map(path => store.controlPointsOf(path.id));
+    const frameKey = [focusId, filterAgentId, options.retainTrace ?? false, trailRetention, options.showNib ?? false, options.inspectNib ?? false,
+      ...this.ordered.flatMap(path => {
+        const camera = options.viewById?.get(path.id) ?? view;
+        return [path.id, progressById.get(path.id) ?? 1, options.opacityById?.get(path.id) ?? 1,
+          camera.scale, camera.translateX, camera.translateY, store.transformOf(path.id).scale];
+      })].join("|");
+    if (frameKey === this.lastFrameKey && paths === this.lastFramePaths && agents === this.lastFrameAgents
+      && controls.every((points, index) => points === this.lastFrameControls[index])) {
+      this.metrics.frameMs = performance.now() - frameStart; return;
+    }
+    this.lastFrameKey = frameKey;
+    this.lastFramePaths = paths;
+    this.lastFrameAgents = agents;
+    this.lastFrameControls = controls;
+    this.visible.length = 0;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     for (const path of this.ordered) {
       if (focusId && path.id !== focusId) continue;
       if (!focusId && filterAgentId && path.agent_id !== filterAgentId) continue;
       const progress = clamp(progressById.get(path.id) ?? 1, 0, 1);
       const opacity = clamp(options.opacityById?.get(path.id) ?? 1, 0, 1);
-      if (progress <= 0 || opacity <= 0) continue;
+      if ((progress <= 0 && !options.showNib) || opacity <= 0) continue;
       const geometry = this.geometry(path, store);
       if (!geometry.samples.length) continue;
       const pathView = options.viewById?.get(path.id) ?? view;
@@ -463,14 +470,28 @@ export class MeteorRenderer {
       const y = pathView.translateY * this.height;
       ctx.setTransform(this.dpr * zoom, 0, 0, this.dpr * zoom, x * this.dpr, y * this.dpr);
       const retainTrace = options.retainTrace ?? false;
-      const start = this.drawMeteor(geometry, progress, zoom, store.transformOf(path.id).scale, retainTrace, opacity, trailRetention);
+      this.activeNib = geometry.nib;
+      const transformScale = store.transformOf(path.id).scale;
+      let start = retainTrace ? 0 : animatedTrailStart(progress, trailRetention);
+      const work = this.rasterEnabled ? this.rasterWork(geometry, zoom, transformScale, retainTrace) : null;
+      if (progress > 0) {
+        if (work) this.drawRasterWork(work, progress, opacity, trailRetention);
+        else start = this.drawMeteor(geometry, progress, zoom, transformScale, retainTrace, opacity, trailRetention);
+      }
+      if (options.showNib) {
+        const node = work ? this.nodeAt(work.nodes, progress) : this.contactNode(geometry, progress, zoom, transformScale, retainTrace);
+        if (progress === 0) this.paintContact(node, geometry, zoom, opacity, retainTrace);
+        this.drawContact(node, geometry.nib, zoom, opacity, !!options.inspectNib, { x, y });
+      }
       if (opacity >= 0.08) this.visible.push({ id: path.id, geometry, from: start, to: progress, zoom, x, y, retainTrace, opacity, trailRetention });
     }
     ctx.globalAlpha = 1;
+    this.metrics.frameMs = performance.now() - frameStart;
   }
 
-  private drawMeteor(geometry: MeteorGeometry, progress: number, zoom: number, transformScale: number, retainTrace: boolean, opacity: number, trailRetention: number): number {
+  private drawMeteor(geometry: MeteorGeometry, progress: number, zoom: number, transformScale: number, retainTrace: boolean, opacity: number, trailRetention: number, capture?: NodeCapture): number {
     const { samples, signature } = geometry;
+    this.activeNib = geometry.nib;
     const style = signature.brush_style;
     const segmentCount = samples.length - 1;
     const pathPixels = geometry.length * zoom;
@@ -478,36 +499,33 @@ export class MeteorRenderer {
     const tailPixels = clamp(Math.min(this.width, this.height) * 0.24, 85, 185) * tailStyle;
     const tailSpan = Math.min(1, tailPixels / Math.max(1, pathPixels));
     const from = retainTrace ? 0 : animatedTrailStart(progress, trailRetention);
-    const scale = clamp(Math.sqrt(Math.max(0.01, transformScale) * zoom), 0.8, 1.16) * (retainTrace ? 1.12 : 0.94);
+    const scale = clamp(Math.sqrt(Math.max(0.01, transformScale) * zoom), 0.8, 1.16) * ((capture?.retainTrace ?? retainTrace) ? 1.12 : 0.94);
 
     if (segmentCount === 0 || pathPixels < 0.01) {
-      // A genuine zero-length semantic gesture remains one compact diamond.
+      if (capture) { capture.nodes = []; return from; }
+      // A zero-length gesture is an impression of this same nib, not a
+      // generic diamond. Keep the previous compact 1.4 CSS-pixel size budget.
       const point = samples[0];
-      const r = 0.7 / zoom;
       const ctx = this.context;
       ctx.globalAlpha = opacity;
       ctx.fillStyle = point.color;
       ctx.beginPath();
-      ctx.moveTo(point.x - r, point.y);
-      ctx.lineTo(point.x, point.y - r * 0.55);
-      ctx.lineTo(point.x + r, point.y);
-      ctx.lineTo(point.x, point.y + r * 0.55);
-      ctx.closePath();
+      appendBrushHeadSweep(ctx, buildBrushHeadSweep([{ ...point, ...geometry.nibBearing, width: 1.4 }], this.activeNib, zoom));
       ctx.fill();
       return from;
     }
 
-    const start = from * segmentCount;
-    const end = progress * segmentCount;
+    const start = from;
+    const end = progress;
     const positions = [start];
-    for (let i = Math.floor(start) + 1; i < end; i++) positions.push(i);
+    for (const sample of samples) if (sample.progress > start && sample.progress < end) positions.push(sample.progress);
     // Sample the final nib independently of centreline density, so even a long
     // trajectory has a real tapered/chisel end instead of one oversized quad.
     const nominalTip = sampleBrushMaterial(style, 1, progress, 0, signature.width_ratio, scale).tipLength;
     const displayLimits = getBrushDisplayLimits(pathPixels, signature.width_change_count, nominalTip);
     const tipLength = displayLimits.tipLength;
     for (let i = 4; i >= 1; i--) {
-      const position = end - (tipLength * i / 4) / pathPixels * segmentCount;
+      const position = end - (tipLength * i / 4) / pathPixels;
       if (position > start && position < end) positions.push(position);
     }
     positions.push(end);
@@ -515,14 +533,16 @@ export class MeteorRenderer {
 
     const nodes: RibbonNode[] = [];
     let lastPosition = -1;
+    let sampleCursor = 1;
     for (const position of positions) {
-      if (position - lastPosition < 0.000001) continue;
+      if (position - lastPosition < 1e-12) continue;
       lastPosition = position;
-      const index = Math.min(segmentCount - 1, Math.floor(position));
+      while (sampleCursor < segmentCount && samples[sampleCursor].progress < position) sampleCursor++;
+      const index = sampleCursor - 1;
       const a = samples[index];
       const b = samples[index + 1];
-      const f = position - index;
-      const t = position / segmentCount;
+      const f = clamp((position - a.progress) / Math.max(1e-12, b.progress - a.progress), 0, 1);
+      const t = position;
       let nx = mix(a.nx, b.nx, f);
       let ny = mix(a.ny, b.ny, f);
       const normalLength = Math.hypot(nx, ny);
@@ -548,32 +568,27 @@ export class MeteorRenderer {
         dryness: mix(a.texture.dryness, b.texture.dryness, f),
         grain: mix(a.texture.grain, b.texture.grain, f),
       };
-      const remaining = Math.max(0, (progress - t) * pathPixels);
-      const tipPhase = clamp(remaining / tipLength, 0, 1);
       const tail = retainTrace
         ? Math.pow(clamp(1 - (progress - t) / tailSpan, 0, 1), 1.2)
         : animatedTrailOpacity(progress, t, trailRetention);
-      let taper = 1;
-      if (style === "calligraphy") taper = Math.pow(Math.sin(tipPhase * Math.PI / 2), 1.85);
-      else if (style === "soft") taper = 0.025 + 0.975 * Math.pow(Math.sin(tipPhase * Math.PI / 2), 1.3);
-      else if (style === "watercolor") taper = 0.04 + 0.96 * Math.sqrt(Math.max(0, 1 - (1 - tipPhase) ** 2));
-      else if (style === "texture") taper = 0.72 + tipPhase * 0.28;
       const tailWidth = retainTrace ? 1 : 0.22 + Math.pow(tail, 0.6) * 0.78;
       const edgeCoverage = (texture.leftEdge + texture.rightEdge) * 0.5;
       const minimumWidth = Math.min(displayLimits.maxWidth, displayLimits.minConnector / Math.max(0.4, edgeCoverage));
       const connectedWidth = clamp(material.width, minimumWidth, displayLimits.maxWidth);
-      const width = connectedWidth * taper * tailWidth;
+      // The authored pressure envelope, size limits and fading tail are
+      // unchanged. The former moving pointed/chisel taper was the OLD nib;
+      // replacing it is essential or every new head would collapse to a point.
+      const width = connectedWidth * tailWidth;
       nodes.push({
         x: mix(a.x, b.x, f),
         y: mix(a.y, b.y, f),
         nx, ny,
+        nibNx: geometry.nibBearing.nx, nibNy: geometry.nibBearing.ny,
         width,
         texture,
         progress: t,
         bias: material.edgeBias,
-        // Keep edge retreat slower than centreline advance; otherwise a broad
-        // chisel can fold its last quad backward and resemble a forked tip.
-        cutback: Math.min(tipLength * 0.42, style === "hard" ? width * 0.6 : style === "texture" ? width * 0.28 : 0) * (1 - tipPhase) ** 2,
+        cutback: 0,
         // Completed comparison/detail frames keep pigment readable instead of
         // fading the very surface detail the viewer is trying to inspect.
         energy: opacity * (retainTrace ? style === "calligraphy" ? 1 : 0.82 + tail * 0.18 : tail),
@@ -581,6 +596,16 @@ export class MeteorRenderer {
       });
     }
 
+    if (capture) {
+      capture.nodes = nodes.map(node => ({ ...node, energy: 1 }));
+      return from;
+    }
+    this.paintMaterials(nodes, signature, zoom, retainTrace);
+    return from;
+  }
+
+  private paintMaterials(nodes: RibbonNode[], signature: StrokeVisualSignature, zoom: number, retainTrace: boolean): void {
+    const style = signature.brush_style;
     // The shared halo is deliberately weaker than the pigment surface. Each
     // instrument has its own internal deposit/edge structure inside one ribbon.
     const halo = style === "hard" ? 1.35 : style === "watercolor" ? 1.25 : 1.35;
@@ -612,20 +637,281 @@ export class MeteorRenderer {
       this.drawBand(nodes, (n) => -0.4 + n.texture.depositOffset, (n) => 0.4 + n.texture.depositOffset, 0.32, "rim", zoom);
       this.drawFibers(nodes, zoom, 5, "texture");
     }
-    return from;
+  }
+
+  private rasterWork(geometry: MeteorGeometry, zoom: number, transformScale: number, retainTrace: boolean): RasterWork | null {
+    if (geometry.samples.length < 2 || geometry.length * zoom < 0.01) return null;
+    const recipe = `${zoom}:${transformScale}:${this.dpr}:${retainTrace}`;
+    const prior = this.rasterWorks.get(geometry.path.id);
+    if (prior?.geometry === geometry && prior.key.endsWith(`:${recipe}/`)) return prior;
+    if (prior) this.raster.deletePrefix(prior.key);
+    const capture: NodeCapture = { nodes: [], retainTrace };
+    this.drawMeteor(geometry, 1, zoom, transformScale, true, 1, 0.2, capture);
+    const nodes = capture.nodes;
+    if (nodes.length < 2) return null;
+    const key = `${++this.rasterSerial}:${geometry.path.id}:${recipe}/`;
+    const resolution = zoom * this.dpr;
+    const tiles = splitNibTiles(nodes, zoom).map((part, index) => {
+      const contacts = nodes.slice(Math.max(0, part.start - 2), part.end + 1)
+        .flatMap(node => placeBrushHead(geometry.nib, this.nibPose(node), zoom));
+      const pad = 3 / zoom;
+      const x = Math.floor((Math.min(...contacts.map(p => p.x)) - pad) * resolution) / resolution;
+      const y = Math.floor((Math.min(...contacts.map(p => p.y)) - pad) * resolution) / resolution;
+      const right = Math.ceil((Math.max(...contacts.map(p => p.x)) + pad) * resolution) / resolution;
+      const bottom = Math.ceil((Math.max(...contacts.map(p => p.y)) + pad) * resolution) / resolution;
+      return { ...part, key: `${key}${index}`, x, y, width: right - x, height: bottom - y };
+    });
+    const work = { geometry, key, nodes, tiles, zoom, retainTrace };
+    this.rasterWorks.set(geometry.path.id, work);
+    return work;
+  }
+
+  private tileSurface(work: RasterWork, tile: RasterTile): HTMLCanvasElement | null {
+    const cached = this.raster.get(tile.key);
+    if (cached) return cached;
+    const resolution = work.zoom * this.dpr;
+    const canvas = this.raster.make(Math.ceil(tile.width * resolution), Math.ceil(tile.height * resolution));
+    const context = canvas?.getContext("2d");
+    if (!canvas || !context) return null;
+    const previous = this.context;
+    this.context = context;
+    try {
+      context.setTransform(resolution, 0, 0, resolution, -tile.x * resolution, -tile.y * resolution);
+      // A half-device-pixel bleed closes antialias seams between adjacent
+      // bitmaps. It only reveals already swept ink, never future contacts.
+      const bleed = 0.6 / resolution;
+      if (tile.start > 0) this.clipNibSpan(work.nodes[tile.start], true, bleed);
+      if (tile.end < work.nodes.length - 1) this.clipNibSpan(work.nodes[tile.end], false, bleed);
+      this.paintMaterials(work.nodes.slice(Math.max(0, tile.start - 2), tile.end + 1), work.geometry.signature, work.zoom, work.retainTrace);
+    } finally { this.context = previous; }
+    this.raster.put(tile.key, canvas);
+    this.metrics.tileBakes++; this.metrics.frameTileBakes++;
+    return canvas;
+  }
+
+  private nodeAt(nodes: RibbonNode[], progress: number): RibbonNode {
+    const t = clamp(progress, 0, 1);
+    let index = 1;
+    while (index < nodes.length - 1 && nodes[index].progress < t) index++;
+    const a = nodes[index - 1] ?? nodes[0], b = nodes[index] ?? a;
+    const f = clamp((t - a.progress) / Math.max(1e-10, b.progress - a.progress), 0, 1);
+    // Interpolate the PHYSICAL contact, exactly as the swept material does.
+    // Interpolating raw width then applying an old texture edge could make the
+    // displayed head 50% wider; normalized-vector lerp also misrotated turns.
+    const pose = interpolateBrushHeadPose(this.nibPose(a), this.nibPose(b), f);
+    const travel = interpolateBrushHeadPose({ ...a, width: a.width }, { ...b, width: b.width }, f);
+    const texture = Object.fromEntries(Object.keys(a.texture).map(key => [key,
+      mix(a.texture[key as keyof BrushTextureSample], b.texture[key as keyof BrushTextureSample], f),
+    ])) as unknown as BrushTextureSample;
+    const coverage = Math.max(1e-10, (texture.leftEdge + texture.rightEdge) * 0.5);
+    return { ...a, x: pose.x, y: pose.y, nx: travel.nx, ny: travel.ny, nibNx: pose.nx, nibNy: pose.ny,
+      width: pose.width / coverage, texture, progress: t, sample: f < 0.5 ? a.sample : b.sample };
+  }
+
+  private contactNode(geometry: MeteorGeometry, progress: number, zoom: number, transformScale: number, retainTrace: boolean): RibbonNode {
+    const capture: NodeCapture = { nodes: [], retainTrace };
+    this.drawMeteor(geometry, 1, zoom, transformScale, true, 1, 0.2, capture);
+    if (capture.nodes.length) return this.nodeAt(capture.nodes, progress);
+    const sample = geometry.samples[0];
+    const coverage = Math.max(1e-10, (sample.texture.leftEdge + sample.texture.rightEdge) * 0.5);
+    return { ...sample, nx: 0, ny: 1, nibNx: geometry.nibBearing.nx, nibNy: geometry.nibBearing.ny,
+      width: 1.4 / coverage, bias: 0, cutback: 0, energy: 1, sample, progress: 0 };
+  }
+
+  private drawRasterWork(work: RasterWork, progress: number, opacity: number, retention: number): void {
+    const ctx = this.context;
+    const from = work.retainTrace ? 0 : animatedTrailStart(progress, retention);
+    const head = this.nodeAt(work.nodes, progress), rear = this.nodeAt(work.nodes, from);
+    const pathPixels = work.geometry.length * work.zoom;
+    const style = work.geometry.signature.brush_style;
+    const tailStyle = style === "hard" ? 0.82 : style === "texture" ? 0.93 : style === "watercolor" ? 1.2 : 1.1;
+    const tailSpan = Math.min(1, clamp(Math.min(this.width, this.height) * 0.24, 85, 185) * tailStyle / Math.max(1, pathPixels));
+    const energy = (position: number) => opacity * (work.retainTrace
+      ? style === "calligraphy" ? 1 : 0.82 + 0.18 * Math.pow(clamp(1 - (progress - position) / tailSpan, 0, 1), 1.2)
+      : animatedTrailOpacity(progress, position, retention));
+    for (const tile of work.tiles) {
+      const a = work.nodes[tile.start], b = work.nodes[tile.end];
+      if (a.progress >= progress || b.progress < from) continue;
+      if (progress < 1 && progress <= b.progress) {
+        // Only the short advancing tile is swept live. Never reveal a clipped
+        // FUTURE footprint (especially when a wider nib is about to turn).
+        // Its final pose is the same object used for the visible head outline.
+        const prefix = work.nodes.slice(Math.max(0, tile.start - 2), tile.end + 1)
+          .filter(node => node.progress < progress).map(node => ({ ...node, energy: energy(node.progress) }));
+        prefix.push({ ...head, energy: energy(progress) });
+        ctx.save();
+        if (tile.start > 0) this.clipNibSpan(a, true);
+        if (from > a.progress) this.clipNibSpan(rear, true);
+        this.paintMaterials(prefix, work.geometry.signature, work.zoom, work.retainTrace);
+        ctx.restore();
+        continue;
+      }
+      const source = this.tileSurface(work, tile);
+      if (!source) {
+        // A browser can refuse a bitmap under memory pressure or at extreme
+        // zoom. Keep the ink complete with a scoped vector fallback, rather
+        // than silently dropping this section of the artwork.
+        ctx.save();
+        if (tile.start > 0) this.clipNibSpan(a, true);
+        if (tile.end < work.nodes.length - 1) this.clipNibSpan(b, false);
+        if (progress < b.progress) this.clipNibSpan(head, false);
+        if (from > a.progress) this.clipNibSpan(rear, true);
+        const visibleNodes = work.nodes.slice(Math.max(0, tile.start - 2), tile.end + 1)
+          .map(node => ({ ...node, energy: energy(node.progress) }));
+        this.paintMaterials(visibleNodes, work.geometry.signature, work.zoom, work.retainTrace);
+        ctx.restore();
+        continue;
+      }
+      ctx.save();
+      if (progress < b.progress) this.clipNibSpan(head, false);
+      if (from > a.progress) this.clipNibSpan(rear, true);
+      const low = energy(Math.max(from, a.progress)), high = energy(Math.min(progress, b.progress));
+      let image: HTMLCanvasElement = source;
+      if (Math.abs(high - low) > 0.01) {
+        if (!this.scratch) this.scratch = this.raster.make(source.width, source.height);
+        if (this.scratch) {
+          this.scratch.width = source.width; this.scratch.height = source.height;
+          const mask = this.scratch.getContext("2d")!;
+          mask.drawImage(source, 0, 0);
+          mask.globalCompositeOperation = "destination-in";
+          const r = work.zoom * this.dpr;
+          const gradient = mask.createLinearGradient((a.x - tile.x) * r, (a.y - tile.y) * r, (b.x - tile.x) * r + 1e-5, (b.y - tile.y) * r);
+          for (let step = 0; step <= 8; step++) gradient.addColorStop(step / 8, `rgba(0,0,0,${energy(mix(a.progress, b.progress, step / 8))})`);
+          mask.fillStyle = gradient; mask.fillRect(0, 0, source.width, source.height);
+          mask.globalCompositeOperation = "source-over";
+          image = this.scratch; ctx.globalAlpha = 1;
+        } else ctx.globalAlpha = (low + high) * 0.5;
+      } else ctx.globalAlpha = (low + high) * 0.5;
+      ctx.drawImage(image, tile.x, tile.y, tile.width, tile.height);
+      this.metrics.spriteDraws++; this.metrics.frameSpriteDraws++;
+      ctx.restore();
+    }
+  }
+
+  private contactPath(node: RibbonNode, vertices: readonly NibPoint[], zoom: number, width = this.nibPose(node).width): NibPoint[] {
+    return placeBrushHead(vertices, { ...this.nibPose(node), width }, zoom);
+  }
+
+  private polygon(points: readonly NibPoint[]): void {
+    const ctx = this.context;
+    ctx.beginPath(); if (!points.length) return;
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i].x, points[i].y);
+    ctx.closePath();
+  }
+
+  private paintContact(node: RibbonNode, geometry: MeteorGeometry, zoom: number, opacity: number, retainTrace: boolean): void {
+    const ctx = this.context;
+    const contact = { ...node, energy: opacity };
+    ctx.save();
+    // A stationary impression uses the SAME material as the dragged body.
+    // Do not cover watercolor or dry-bristle gaps with a solid fake cap.
+    this.paintMaterials([contact, contact], geometry.signature, zoom, retainTrace);
+    ctx.restore();
+  }
+
+  private drawContact(node: RibbonNode, vertices: readonly NibPoint[], zoom: number, opacity: number, inspect: boolean, camera: Point): void {
+    const ctx = this.context;
+    ctx.save();
+    const width = this.nibPose(node).width;
+    // No decorative offset, introductory scale or independent rotation. This
+    // is the exact footprint used by the just-painted terminal sweep.
+    const contact = this.contactPath(node, vertices, zoom);
+    ctx.strokeStyle = "#dcf7f1";
+    ctx.lineWidth = 0.8 / zoom;
+    ctx.globalAlpha = opacity * 0.85;
+    this.polygon(contact); ctx.stroke();
+    ctx.restore();
+    if (!inspect) return;
+    // The inspector is a magnified copy of the current nib contact, NOT a
+    // second stroke or an enlarged paint footprint. Keep it in screen space.
+    const magnification = clamp(46 / Math.max(0.4, width), 3, 28);
+    // Capture the actual freshly drawn ink BEFORE laying down the lens panel.
+    // The magnified trailing section visibly joins the exact contact polygon.
+    if (!this.contactLens && this.rasterEnabled) this.contactLens = this.raster.make(Math.ceil(140 * this.dpr), Math.ceil(88 * this.dpr));
+    const lensContext = this.contactLens?.getContext("2d");
+    if (this.contactLens && lensContext) {
+      lensContext.setTransform(1, 0, 0, 1, 0, 0);
+      lensContext.clearRect(0, 0, this.contactLens.width, this.contactLens.height);
+      lensContext.drawImage(this.canvas,
+        (node.x * zoom + camera.x - 70 / magnification) * this.dpr,
+        (node.y * zoom + camera.y - 44 / magnification) * this.dpr,
+        140 * this.dpr / magnification, 88 * this.dpr / magnification,
+        0, 0, this.contactLens.width, this.contactLens.height);
+    }
+    ctx.save(); ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    const size = 140, left = Math.max(10, this.width - size - 14), top = 14;
+    ctx.globalAlpha = 0.94; ctx.fillStyle = "#0b1218"; ctx.fillRect(left, top, size, 132);
+    ctx.strokeStyle = "#48616a"; ctx.lineWidth = 1; ctx.strokeRect(left + 0.5, top + 0.5, size - 1, 131);
+    ctx.globalAlpha = 1; ctx.fillStyle = "#d8ebe8"; ctx.font = "14px system-ui";
+    ctx.fillText("BRUSH CONTACT", left + 10, top + 19);
+    if (this.contactLens) ctx.drawImage(this.contactLens, left, top + 28, 140, 88);
+    const pose = { ...this.nibPose(node), x: left + size / 2, y: top + 72, width: width * magnification };
+    const enlarged = placeBrushHead(vertices, pose);
+    // Outline the magnified REAL ink; never paint an independent flat proxy.
+    this.polygon(enlarged);
+    ctx.strokeStyle = "#d8f4ee"; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = "#a9c5c0"; ctx.font = "14px system-ui";
+    ctx.fillText("Contact · magnified", left + 8, top + 117);
+    ctx.restore();
   }
 
   private drawCalligraphy(nodes: RibbonNode[], zoom: number, singlePigment: boolean): void {
     const sections = new Map(nodes.map((node) => [node, sampleCalligraphyBundles(node.texture, node.progress, node.width)]));
-    // Do not lay a full-width undercoat beneath these bundles: the clear splits
-    // are genuine missing pigment and can show stars or an earlier stroke.
-    // Every bundle joins the loaded entry and all are swept along one centreline.
+    // Clip the existing seven ink bundles THROUGH the actual head. All fans
+    // share one compound fill, so touching wet hairs cannot brighten seams.
+    this.paintNibBands(nodes, Array.from({ length: 7 }, (_, bundle) => ({
+      low: (node: RibbonNode) => sections.get(node)![bundle].low,
+      high: (node: RibbonNode) => sections.get(node)![bundle].high,
+    })), 1, "color", zoom, singlePigment);
+  }
+
+  private nibPose(node: RibbonNode, low = -1, high = 1): BrushHeadPose {
+    const expansion = Math.max(1, Math.abs(low), Math.abs(high));
+    return { x: node.x, y: node.y, nx: node.nibNx ?? node.nx, ny: node.nibNy ?? node.ny,
+      // Match the former ribbon's effective cross-width, not the circumcircle
+      // of the radar polygon (which would make asymmetric heads much thinner).
+      width: node.width * (node.texture.leftEdge + node.texture.rightEdge) * 0.5 * expansion,
+      low: low / expansion, high: high / expansion };
+  }
+
+  /** A shared boundary assigns adjacent pigment spans without over-stamping. */
+  private clipNibSpan(node: RibbonNode, forward: boolean, bleed = 0): void {
     const ctx = this.context;
+    const reach = (Math.max(this.width, this.height) + Math.abs(node.x) + Math.abs(node.y) + 100) * 8;
+    const direction = forward ? 1 : -1;
+    const tx = node.ny * direction * reach, ty = -node.nx * direction * reach;
+    const x = node.x - node.ny * direction * bleed, y = node.y + node.nx * direction * bleed;
+    const ax = x + node.nx * reach, ay = y + node.ny * reach;
+    const bx = x - node.nx * reach, by = y - node.ny * reach;
+    ctx.beginPath();
+    ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+    ctx.lineTo(bx + tx, by + ty); ctx.lineTo(ax + tx, ay + ty);
+    ctx.closePath(); ctx.clip();
+  }
+
+  private paintNibBands(nodes: RibbonNode[], bands: { low: number | ((node: RibbonNode) => number); high: number | ((node: RibbonNode) => number) }[], strength: number, pigment: "color" | "core" | "rim" | "groove", zoom: number, singlePigment = false): void {
+    if (nodes.length < 2) return;
+    const ctx = this.context;
+    // Sweep each material exactly once. Palette spans reuse its pieces instead
+    // of repeatedly rebuilding overlapping shoulder/edge neighbourhoods.
+    const surfaces = bands.map(band => {
+      const poses = nodes.map(node => this.nibPose(node,
+        typeof band.low === "number" ? band.low : clamp(band.low(node), -1, 1),
+        typeof band.high === "number" ? band.high : clamp(band.high(node), -1, 1)));
+      const compact = simplifyBrushHeadPoses(poses, this.activeNib, zoom);
+      const compactRanges: { start: number; end: number }[] = [];
+      const polygons = buildBrushHeadSweep(compact.poses, this.activeNib, zoom, compactRanges);
+      let cursor = 0;
+      const ranges = nodes.map((_, index) => {
+        while (cursor < compact.indices.length - 1 && compact.indices[cursor] < index) cursor++;
+        return compactRanges[cursor];
+      });
+      return { polygons, ranges };
+    });
     const chunkSize = singlePigment ? nodes.length - 1 : 16;
     for (let start = 0; start < nodes.length - 1;) {
       let end = Math.min(nodes.length - 1, start + chunkSize);
-      // A local chord must track travelled distance even through a reversal.
-      // Never project an entire loop's palette/alpha onto its near-zero chord.
       if (!singlePigment) while (end > start + 1) {
         let arc = 0;
         for (let i = start + 1; i <= end; i++) arc += Math.hypot(nodes[i].x - nodes[i - 1].x, nodes[i].y - nodes[i - 1].y);
@@ -633,30 +919,36 @@ export class MeteorRenderer {
         end = start + Math.max(1, Math.floor((end - start) / 2));
       }
       const a = nodes[start], b = nodes[end];
+      ctx.save();
+      if (start > 0) this.clipNibSpan(a, true);
+      if (end < nodes.length - 1) this.clipNibSpan(b, false);
       if (singlePigment) {
-        // A retained monochrome face is loaded matte ink, not a spatial wash.
-        // Solid fill also remains well-defined for a closed loop's zero chord.
-        ctx.fillStyle = nodes[Math.floor(nodes.length / 2)].sample.color;
-        ctx.globalAlpha = a.energy;
+        ctx.fillStyle = nodes[Math.floor(nodes.length / 2)].sample[pigment];
+        ctx.globalAlpha = a.energy * strength;
       } else {
         const gradient = ctx.createLinearGradient(a.x, a.y, b.x + 0.00001, b.y);
         for (let i = start; i <= end; i++) {
           const node = nodes[i];
           gradient.addColorStop(clamp((node.progress - a.progress) / Math.max(0.0000001, b.progress - a.progress), 0, 1),
-            node.sample.color.replace(")", ` / ${clamp(node.energy, 0, 1).toFixed(4)})`));
+            node.sample[pigment].replace(")", ` / ${clamp(node.energy, 0, 1).toFixed(4)})`));
         }
-        ctx.globalAlpha = 1;
+        ctx.globalAlpha = strength;
         ctx.fillStyle = gradient;
       }
+      // Include nearby footprints on either side of the ownership boundary.
+      // Their geometry must agree at the join; only the pigment span is cut.
+      let first = start, last = end;
+      const padding = 14 / zoom;
+      while (first > 0 && start - first < 24 && Math.hypot(nodes[first].x - a.x, nodes[first].y - a.y) < padding) first--;
+      while (last < nodes.length - 1 && last - end < 24 && Math.hypot(nodes[last].x - b.x, nodes[last].y - b.y) < padding) last++;
       ctx.beginPath();
-      for (let bundle = 0; bundle < 7; bundle++) {
-        for (let i = start; i <= end; i++) this.ribbonVertex(nodes[i], sections.get(nodes[i])![bundle].high, zoom, i === start);
-        for (let i = end; i >= start; i--) this.ribbonVertex(nodes[i], sections.get(nodes[i])![bundle].low, zoom);
-        ctx.closePath();
+      for (const surface of surfaces) {
+        appendBrushHeadSweep(ctx, surface.polygons.slice(surface.ranges[first].start, surface.ranges[last].end));
       }
-      // Fill all touching wet bundles as one compound surface. Individually
-      // anti-aliased adjacent fills would fabricate a woven grid in solid ink.
+      // One nonzero union fill per layer/span: overlapping nib impressions do
+      // not accumulate opacity. No per-stamp alpha or particle gaps are used.
       ctx.fill();
+      ctx.restore();
       start = end;
     }
   }
@@ -674,20 +966,7 @@ export class MeteorRenderer {
   }
 
   private drawBand(nodes: RibbonNode[], low: number | ((node: RibbonNode) => number), high: number | ((node: RibbonNode) => number), strength: number, pigment: "color" | "core" | "rim" | "groove", zoom: number): void {
-    const ctx = this.context;
-    for (let i = 1; i < nodes.length; i++) {
-      const a = nodes[i - 1];
-      const b = nodes[i];
-      ctx.globalAlpha = clamp((a.energy + b.energy) * 0.5 * strength, 0, 1);
-      ctx.fillStyle = a.sample[pigment];
-      ctx.beginPath();
-      this.ribbonVertex(a, typeof high === "number" ? high : clamp(high(a), -1, 1), zoom, true);
-      this.ribbonVertex(b, typeof high === "number" ? high : clamp(high(b), -1, 1), zoom);
-      this.ribbonVertex(b, typeof low === "number" ? low : clamp(low(b), -1, 1), zoom);
-      this.ribbonVertex(a, typeof low === "number" ? low : clamp(low(a), -1, 1), zoom);
-      ctx.closePath();
-      ctx.fill();
-    }
+    this.paintNibBands(nodes, [{ low, high }], strength, pigment, zoom);
   }
 
   private drawFibers(nodes: RibbonNode[], zoom: number, count: number, material: "soft" | "texture"): void {
@@ -696,9 +975,8 @@ export class MeteorRenderer {
     ctx.save();
     // This explicit silhouette clip means a bristle can never become a branch.
     ctx.beginPath();
-    nodes.forEach((node, index) => this.ribbonVertex(node, 1, zoom, index === 0));
-    for (let i = nodes.length - 1; i >= 0; i--) this.ribbonVertex(nodes[i], -1, zoom);
-    ctx.closePath();
+    const contact = simplifyBrushHeadPoses(nodes.map(node => this.nibPose(node)), this.activeNib, zoom);
+    appendBrushHeadSweep(ctx, buildBrushHeadSweep(contact.poses, this.activeNib, zoom));
     ctx.clip();
     ctx.lineCap = "butt";
     for (let fiber = 0; fiber < count; fiber++) {
@@ -726,7 +1004,7 @@ export class MeteorRenderer {
     ctx.restore();
   }
 
-  /** Hit the visible, rounded centreline from the latest drawn frame, in CSS px. */
+  /** Hit the same corner-preserving centreline and arc progress as the ink. */
   hitTest(cssX: number, cssY: number, tolerance = 12): string | null {
     let nearest: string | null = null;
     let nearestDistance = Math.max(0, tolerance) ** 2;
@@ -734,8 +1012,8 @@ export class MeteorRenderer {
       const visible = this.visible[v];
       const samples = visible.geometry.samples;
       const segments = samples.length - 1;
-      const from = visible.from * segments;
-      const to = visible.to * segments;
+      const from = visible.from;
+      const to = visible.to;
       if (segments === 0) {
         const dx = cssX - (samples[0].x * visible.zoom + visible.x);
         const dy = cssY - (samples[0].y * visible.zoom + visible.y);
@@ -743,11 +1021,14 @@ export class MeteorRenderer {
         if (distance <= nearestDistance) { nearestDistance = distance; nearest = visible.id; }
         continue;
       }
-      for (let i = Math.floor(from); i < Math.min(segments, Math.ceil(to)); i++) {
+      for (let i = 0; i < segments; i++) {
         const a = samples[i];
         const b = samples[i + 1];
-        const f0 = clamp(from - i, 0, 1);
-        const f1 = clamp(to - i, 0, 1);
+        if (b.progress < from) continue;
+        if (a.progress > to) break;
+        const interval = Math.max(1e-12, b.progress - a.progress);
+        const f0 = clamp((from - a.progress) / interval, 0, 1);
+        const f1 = clamp((to - a.progress) / interval, 0, 1);
         if (f1 <= f0) continue;
         const ax = mix(a.x, b.x, f0) * visible.zoom + visible.x;
         const ay = mix(a.y, b.y, f0) * visible.zoom + visible.y;
@@ -756,7 +1037,7 @@ export class MeteorRenderer {
         const dx = bx - ax;
         const dy = by - ay;
         const u = clamp(((cssX - ax) * dx + (cssY - ay) * dy) / Math.max(0.000001, dx * dx + dy * dy), 0, 1);
-        const position = (i + mix(f0, f1, u)) / segments;
+        const position = mix(a.progress, b.progress, mix(f0, f1, u));
         if (!visible.retainTrace && animatedTrailOpacity(visible.to, position, visible.trailRetention) * visible.opacity < 0.08) continue;
         const distance = (cssX - ax - u * dx) ** 2 + (cssY - ay - u * dy) ** 2;
         if (distance < nearestDistance) { nearestDistance = distance; nearest = visible.id; }
@@ -770,5 +1051,12 @@ export class MeteorRenderer {
     this.ordered = [];
     this.agentsById.clear();
     this.visible.length = 0;
+    this.lastFrameKey = "";
+    this.lastFramePaths = null;
+    this.lastFrameAgents = null;
+    this.lastFrameControls = [];
+    this.raster.clear(); this.rasterWorks.clear();
+    if (this.scratch) { this.scratch.width = 0; this.scratch.height = 0; this.scratch = null; }
+    if (this.contactLens) { this.contactLens.width = 0; this.contactLens.height = 0; this.contactLens = null; }
   }
 }

@@ -179,6 +179,33 @@ export type StrokeColorTreatment = "bright" | "muted";
 export type StrokeLengthClass = "short" | "medium" | "long";
 export type BrushStrokeStyle = "hard" | "soft" | "watercolor" | "texture" | "calligraphy";
 export type BrushTreatment = "original" | "calligraphy";
+/** Radial nib descriptor shared by the inspector and drawing footprint. */
+export type BrushHeadAxisKey = "intensity" | "confidence" | "entropy" | "motion_variation" | "stability" | "curvature" | "branching" | "duration";
+export interface BrushHeadAxis {
+  key: BrushHeadAxisKey;
+  label: string;
+  /** Actual contour radius after contrast and uniform fitting; outer ring 1. */
+  value: number;
+  /** Attribute-derived signal before visual contrast and contour fitting. */
+  signalValue: number;
+  rawValue: number | null;
+  /** Recorded range and late-minus-early change, where applicable. */
+  spread?: number;
+  trend?: number;
+  /** Clockwise from north, in screen coordinates. */
+  angleDegrees: number;
+  source: string;
+  available: boolean;
+}
+export interface BrushHeadProfile {
+  version: 2;
+  /** The derived outline is applied to the stroke, not only previewed. */
+  previewOnly: false;
+  hasData: boolean;
+  axes: BrushHeadAxis[];
+  /** Connected in axis order; normalized coordinates in [-1, 1]. */
+  vertices: { x: number; y: number }[];
+}
 /** Six complete, continuous centreline grammars selected by geometry_mode. */
 export type StrokeMotionPattern = "glide" | "arc" | "wave" | "fold" | "orbit" | "wander";
 

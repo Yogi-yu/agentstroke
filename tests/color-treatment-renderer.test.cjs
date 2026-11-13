@@ -146,8 +146,11 @@ class Context {
   bezierCurveTo(...args) { this.points.push(["bezier", ...args]); }
   clip() { this.clips = [...this.clips, structuredClone(this.points)]; }
   color(paint) { return typeof paint === "object" ? structuredClone({ stops: paint.stops, args: paint.args }) : paint; }
-  fill() { this.frame.push({ kind: "fill", points: structuredClone(this.points), alpha: this.globalAlpha, color: this.color(this.fillStyle), transform: this.transform, composite: this.globalCompositeOperation, clips: structuredClone(this.clips) }); }
-  stroke() { this.frame.push({ kind: "stroke", points: structuredClone(this.points), alpha: this.globalAlpha, color: this.color(this.strokeStyle), width: this.lineWidth, cap: this.lineCap, join: this.lineJoin, transform: this.transform, composite: this.globalCompositeOperation, clips: structuredClone(this.clips) }); }
+  // clip() creates immutable snapshots. Share them across operations just as
+  // Canvas shares its active clip, instead of duplicating a large swept shape
+  // for every bristle segment. The frame clone still preserves full geometry.
+  fill() { this.frame.push({ kind: "fill", points: structuredClone(this.points), alpha: this.globalAlpha, color: this.color(this.fillStyle), transform: this.transform, composite: this.globalCompositeOperation, clips: this.clips }); }
+  stroke() { this.frame.push({ kind: "stroke", points: structuredClone(this.points), alpha: this.globalAlpha, color: this.color(this.strokeStyle), width: this.lineWidth, cap: this.lineCap, join: this.lineJoin, transform: this.transform, composite: this.globalCompositeOperation, clips: this.clips }); }
   createLinearGradient(...args) { const stops = []; return { args, stops, addColorStop: (position, color) => stops.push([position, color]) }; }
   createRadialGradient(...args) { return this.createLinearGradient(...args); }
   save() {
@@ -213,7 +216,9 @@ test("all five materials keep identical point/short/long drawing commands, alpha
     const profile = createNaturalPigment(toned.id, b.signature.color_count);
     for (let i = 0; i < a.samples.length; i++) {
       const source = a.samples[i], target = b.samples[i];
-      const expected = sampleNaturalPigment(profile, i / Math.max(1, b.samples.length - 1), target.texture, material.style);
+      // Retained source corners make sample spacing nonuniform. Pigment still
+      // follows travelled distance, never the number of inserted samples.
+      const expected = sampleNaturalPigment(profile, target.progress, target.texture, material.style);
       for (const key of PIGMENTS) {
         const one = paint(source[key]), two = paint(target[key]);
         assert.equal(one.format, "hsl", "bright pigments keep the old recipe");

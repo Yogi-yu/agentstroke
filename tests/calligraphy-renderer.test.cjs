@@ -6,6 +6,8 @@ const {
   MeteorRenderer, sampleBrushMaterial, sampleBrushTexture, sampleCalligraphyBundles,
   getBrushMaterialConfig, getBrushDisplayLimits,
 } = load("render/meteorRenderer.ts");
+const { resolveBrushHeadProfile } = load("engine/brushHeadProfile.ts");
+const { normalizeBrushHead, placeBrushHead } = load("engine/brushHeadSweep.ts");
 
 function path(treatment = "calligraphy") {
   return {
@@ -123,16 +125,19 @@ test("calligraphy geometry is not watercolor with another alpha and uses no halo
   assert.ok(ink.length <= 7 * 17, "continuous long fills avoid hundreds of transverse antialias seams");
 });
 
-test("calligraphy scrubbing is deterministic, stops at the single pointed head and keeps authored data untouched", () => {
+test("calligraphy scrubbing is deterministic, stops at its bounded physical nib and keeps authored data untouched", () => {
   const { draw, renderer, artwork } = harness();
   const first = draw(0.35, { retainTrace: true });
   draw(0.95, { retainTrace: true });
   assert.deepEqual(draw(0.35, { retainTrace: true }, 99999), first);
   const headX = 100 + 800 * 0.35;
-  const headPoints = first.flatMap(op => op.points).filter(p => Math.abs(p[1] - headX) < 1e-8);
+  const outline = placeBrushHead(normalizeBrushHead(resolveBrushHeadProfile(artwork)), { x: 0, y: 0, nx: 0, ny: 1, width: 12 });
+  const footprintRadius = Math.max(...outline.map(point => Math.hypot(point.x, point.y)));
+  const forwardReach = Math.max(0, ...outline.map(point => point.x));
+  const headPoints = first.flatMap(op => op.points).filter(p => Math.abs(p[1] - headX) <= footprintRadius);
   assert.ok(headPoints.length >= 7);
-  assert.ok(headPoints.every(p => Math.abs(p[2] - 300) < 1e-8), "every hair converges on one pointed head");
-  assert.ok(first.flatMap(op => op.points).every(p => p[1] <= headX + 1e-8), "no future path or detached leading tip");
+  assert.ok(headPoints.some(p => Math.abs(p[2] - 300) > 0.1), "the generated nib must not be collapsed into the former shared point");
+  assert.ok(first.flatMap(op => op.points).every(p => p[1] <= headX + forwardReach + 1e-8), "no future path beyond the physical outline at the original twelve-pixel width budget");
   assert.deepEqual(draw(0), []);
   assert.deepEqual(draw(0.35, { opacityById: new Map([[artwork.id, 0]]) }), []);
   draw(0.7, { trailRetention: 0.8 });

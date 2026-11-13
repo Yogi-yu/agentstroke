@@ -126,12 +126,20 @@ const SphereCanvasView = forwardRef<CanvasHandle, Props>(function SphereCanvasVi
     let firstFrame = true;
     let oriented = false;
     let previous = 0;
+    let lastDiagnosticAt = -Infinity;
+    const frameIntervals: number[] = [];
+    let frameIntervalSum = 0;
     let raf = 0;
     let previousPlaying = playingRef.current;
     const visibilityChanged = () => { previous = 0; };
     document.addEventListener("visibilitychange", visibilityChanged);
     const loop = (now: number) => {
-      const delta = previous && !document.hidden ? Math.min(100, now - previous) : 0;
+      const frameDelta = previous && !document.hidden ? Math.max(0, now - previous) : 0;
+      const delta = Math.min(100, frameDelta);
+      if (frameDelta > 0) {
+        frameIntervals.push(frameDelta); frameIntervalSum += frameDelta;
+        if (frameIntervals.length > 30) frameIntervalSum -= frameIntervals.shift()!;
+      }
       previous = now;
       const data = dataRef.current;
       const motionDelta = scaledMotionDelta(delta, data.motionSpeed);
@@ -164,7 +172,8 @@ const SphereCanvasView = forwardRef<CanvasHandle, Props>(function SphereCanvasVi
           }
           if (playingRef.current && !newFlight) flight.elapsed += motionDelta;
           const cycle = flight.elapsed % (flight.timing.durationMs + 1800);
-          const distance = strokeDistanceAtTime(Math.min(1, cycle / flight.timing.durationMs), flight.timing);
+          const timeProgress = Math.min(1, cycle / flight.timing.durationMs);
+          const distance = strokeDistanceAtTime(timeProgress, flight.timing);
           const fading = Math.max(0, Math.min(1, (cycle - flight.timing.durationMs) / 1400));
           const showComplete = reducedMotion.matches && !playingRef.current;
           progress.set(path.id, showComplete ? 1 : distance);
@@ -173,8 +182,18 @@ const SphereCanvasView = forwardRef<CanvasHandle, Props>(function SphereCanvasVi
         brush.draw(now, data.paths, data.agents, surfaceStore, null, data.filterAgentId,
           DEFAULT_CANVAS_TRANSFORM, progress, {
             retainTrace: reducedMotion.matches && !playingRef.current,
+            showNib: !(reducedMotion.matches && !playingRef.current),
             trailRetention: clampTrailRetention(data.trailRetention), opacityById: opacity,
           });
+        if (now - lastDiagnosticAt >= 500 && canvas.dataset && typeof brush.getRenderStats === "function") {
+          const stats = brush.getRenderStats();
+          canvas.dataset.brushFrameMs = stats.frameMs.toFixed(3);
+          canvas.dataset.brushCacheBakes = String(stats.tileBakes);
+          canvas.dataset.brushCacheTiles = String(stats.tiles);
+          canvas.dataset.brushFrameBakes = String(stats.frameTileBakes);
+          canvas.dataset.animationFrameMs = (frameIntervals.length ? frameIntervalSum / frameIntervals.length : 0).toFixed(2);
+          lastDiagnosticAt = now;
+        }
         dirtyRef.current = false;
         if (data.paths.length) firstFrame = false;
       }

@@ -37,6 +37,7 @@ function StrokePlayerContent({ stroke, agent, onClose, actions, strokeOptions, s
   const agents = useMemo<Agent[]>(() => [{ id: stroke.agent_id, style: agentRenderStyle(agent?.category ?? "coding") }], [stroke.agent_id, agent?.category]);
   const timing = useMemo(() => getStrokePlayback(stroke), [stroke]);
   const material = useMemo(() => resolveVisualSignature(stroke).brush_style, [stroke]);
+  const phase = progress >= 1 ? "Complete" : "Drawing";
 
   useEffect(() => {
     setPlaying(!window.matchMedia("(prefers-reduced-motion: reduce)").matches);
@@ -95,7 +96,7 @@ function StrokePlayerContent({ stroke, agent, onClose, actions, strokeOptions, s
       <section className="panel sd-section">
         <div className="panel-head">
           <h2>Meteor Playback</h2>
-          <span className="sd-playback-status">{progress >= 1 ? "Complete" : playing ? "Playing" : "Paused"}</span>
+          <span className="sd-playback-status">{progress >= 1 || playing ? phase : `Paused · ${phase}`}</span>
         </div>
         <div className="sd-canvas">
           <CanvasView paths={paths} agents={agents} selectedStrokeId={null} filterAgentId={null} editMode={false} onSelectStroke={noop} onTransformCommit={noop} playback={{ progress, playing, speed, replayKey, onProgress }} />
@@ -123,7 +124,7 @@ function StrokePlayerContent({ stroke, agent, onClose, actions, strokeOptions, s
               onChange={(event) => seek(Number(event.target.value))}
             />
           </div>
-          <p className="sd-playback-note">Drag the timeline to inspect a moment. {fmtTime(timing.durationMs)} at 1× · {timing.phaseSpeeds.length} speed phases.</p>
+          <p className="sd-playback-note">Follow the nib as it draws. Scrub to inspect its shape along the stroke. {fmtTime(timing.durationMs)} at 1× · {timing.phaseSpeeds.length} speed phases.</p>
         </div>
       </section>
     </div>

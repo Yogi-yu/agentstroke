@@ -1,0 +1,54 @@
+.preview {
+  min-width: 0;
+  border: 1px solid #2b4146;
+  border-radius: 13px;
+  overflow: hidden;
+  background: #0c1418;
+  color: #d9e7e7;
+}
+.heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 13px 14px 0;
+}
+.heading h3 { margin: 0; font-size: 18px; line-height: 1.4; font-weight: 600; }
+.badge { padding: 3px 8px; border: 1px solid #425a60; border-radius: 6px; color: #adc6ca; font-size: 14px; line-height: 1.4; white-space: nowrap; }
+.canvas { padding: 0 4px 12px; }
+.chart { display: block; width: 100%; height: auto; max-width: 360px; margin: -5px auto -14px; overflow: visible; }
+.ring, .outerRing { fill: none; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ring { stroke: #263b42; }
+.outerRing { stroke: #48646b; }
+.spoke { stroke: #30494f; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.axisLabel { fill: #b8cbd0; font-size: 20px; font-weight: 400; }
+.outline { fill: #9bd8c7; fill-opacity: 0.4; stroke: #b3efda; stroke-width: 2; stroke-linejoin: miter; vector-effect: non-scaling-stroke; }
+.vertex { fill: #c5f6e6; stroke: #0c1418; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.missingVertex { fill: #0c1418; stroke: #8e9fa5; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.center { fill: #8ba7aa; }
+.scale { display: flex; justify-content: space-between; gap: 12px; padding: 0 12px; color: #93aeb5; font-size: 14px; line-height: 1.5; }
+.scale b { margin-left: 5px; font-weight: 500; color: #c5dadd; }
+.note { margin: 0; padding: 11px 14px 13px; border-top: 1px solid #23383f; color: #b1c6cc; font-size: 14px; line-height: 1.55; }
+.note span { display: block; color: #86a5ae; }
+.mapping { border-top: 1px solid #23383f; }
+.mapping summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; cursor: pointer; color: #d0e5e3; font-size: 14px; line-height: 1.5; list-style: none; }
+.mapping summary::after { content: "+"; flex: none; margin-left: auto; color: #a5dacc; font-size: 20px; line-height: 1; }
+.mapping[open] summary::after { content: "−"; }
+.mapping summary::-webkit-details-marker { display: none; }
+.mapping summary span { color: #8aa7ad; font-size: 14px; margin-left: auto; }
+.mapping summary:focus-visible { outline: 2px solid #b3efda; outline-offset: -4px; border-radius: 7px; }
+.mapping summary:hover { background: #122027; }
+.mappingIntro { margin: 0; padding: 0 14px 12px; color: #a7bec4; font-size: 14px; line-height: 1.55; }
+.axes { list-style: none; margin: 0; padding: 0 14px 4px; }
+.axes li { padding: 12px 0; border-top: 1px solid #273d43; }
+.axisHeading { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; font-size: 15px; line-height: 1.5; }
+.axisHeading strong { font-weight: 500; }
+.axisHeading > span { color: #b3efda; font-variant-numeric: tabular-nums; }
+.raw { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 5px; color: #91aab2; font-size: 14px; line-height: 1.5; font-variant-numeric: tabular-nums; }
+.axes li p { margin: 5px 0 0; color: #adc1c7; font-size: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+@media (max-width: 360px) {
+  .heading { padding-left: 10px; padding-right: 10px; }
+  .mapping summary { padding-left: 10px; padding-right: 10px; }
+  .mapping summary span { display: none; }
+}

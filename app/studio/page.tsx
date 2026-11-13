@@ -44,6 +44,7 @@ export default function Home() {
   const transformRequests = useRef(new Map<string, number>());
   const [saving, setSaving] = useState(false);
   const canvasRef = useRef<CanvasHandle>(null);
+  const strokeSidebarRef = useRef<HTMLElement>(null);
   const [displayMode, setDisplayMode] = useState<CanvasDisplayMode>("animated");
   const [trailRetention, setTrailRetention] = useState(ANIMATED_TRAIL_RETENTION);
   const [motionSpeed, setMotionSpeed] = useState(DEFAULT_MOTION_SPEED);
@@ -88,10 +89,20 @@ export default function Home() {
     (id: string | null) => {
       if (edit.active) return; // disable switching to other strokes
       const agentId = id ? strokes.find((s) => s.id === id)?.agent_id ?? null : null;
-      setUI((s) => ({ ...s, selected_stroke: id, highlighted_agent_id: agentId }));
+      setUI((s) => ({
+        ...s, selected_stroke: id, highlighted_agent_id: agentId,
+        // On narrow screens the left inspector is the Strokes tab. A canvas
+        // tap must reveal its preview, rather than leaving it behind that tab.
+        active_mobile_tab: id && window.matchMedia("(max-width: 1024px)").matches ? "strokes" : s.active_mobile_tab,
+      }));
     },
     [edit.active, strokes],
   );
+
+  useEffect(() => {
+    // Reveal a newly selected nib without resetting scroll on background polls.
+    if (ui.selected_stroke && strokeSidebarRef.current) strokeSidebarRef.current.scrollTop = 0;
+  }, [ui.selected_stroke]);
 
   useEffect(() => {
     void appStore.bootstrap();
@@ -413,7 +424,7 @@ export default function Home() {
       </div>
 
       {!cinematic && (
-        <aside className="sidebar left">
+        <aside className="sidebar left" ref={strokeSidebarRef}>
           <StorageNotice />
           {selectedStroke && (
             <StrokeInspector

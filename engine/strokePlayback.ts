@@ -2,11 +2,18 @@ import type { TransitionPath } from "@/lib/types";
 import { resolveVisualSignature } from "./visualSignature";
 
 const clamp = (value: number, low: number, high: number) => Math.max(low, Math.min(high, value));
+/** Compatibility export: playback now begins drawing immediately. */
+export const NIB_LANDING_DURATION_MS = 0;
 
 export interface StrokePlaybackTiming {
+  /** The attribute-driven drawing duration, with no presentation intro. */
   durationMs: number;
+  /** Compatibility alias of durationMs. */
+  drawingDurationMs: number;
+  /** Compatibility field. There is no separate landing phase. */
+  landingDurationMs: number;
   phaseSpeeds: number[];
-  /** Fraction of the total time spent in each equal-distance phase. */
+  /** Fraction of drawing time spent in each equal-distance phase. */
   phaseDurations: number[];
 }
 
@@ -19,17 +26,27 @@ export function getStrokePlayback(path: TransitionPath): StrokePlaybackTiming {
     : 0.5;
   // Longer semantic dwell takes longer to reveal; higher activation draws
   // faster. Keep even very short gestures slow enough to inspect at 1×.
-  const durationMs = Math.round(clamp((1600 + dwell * 1.25) / (0.65 + intensity * 0.7), 2200, 14000));
+  const drawingDurationMs = Math.round(clamp((1600 + dwell * 1.25) / (0.65 + intensity * 0.7), 2200, 14000));
   const phaseSpeeds = signature.speed_profile.map((speed) => clamp(speed, 0.12, 2));
   if (!phaseSpeeds.length) phaseSpeeds.push(1);
   const times = phaseSpeeds.map((speed) => 1 / speed);
   const total = times.reduce((sum, time) => sum + time, 0);
-  return { durationMs, phaseSpeeds, phaseDurations: times.map((time) => time / total) };
+  return {
+    durationMs: drawingDurationMs,
+    drawingDurationMs,
+    landingDurationMs: NIB_LANDING_DURATION_MS,
+    phaseSpeeds, phaseDurations: times.map((time) => time / total),
+  };
+}
+
+/** Compatibility helper: the visible nib draws immediately, without a landing animation. */
+export function strokeLandingAtTime(_progress: number, _timing: StrokePlaybackTiming): number | null {
+  return null;
 }
 
 /** Convert elapsed TIME fraction to travelled DISTANCE fraction, without jumps. */
 export function strokeDistanceAtTime(progress: number, timing: StrokePlaybackTiming): number {
-  const time = clamp(progress, 0, 1);
+  const time = clamp(Number.isFinite(progress) ? progress : 0, 0, 1);
   if (time === 0 || time === 1) return time;
   let start = 0;
   for (let phase = 0; phase < timing.phaseDurations.length; phase++) {

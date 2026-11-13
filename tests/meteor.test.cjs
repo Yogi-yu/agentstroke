@@ -7,6 +7,8 @@ const { getStrokePlayback, strokeDistanceAtTime } = load("engine/strokePlayback.
 const { MeteorRenderer, sampleMeteorCenterline, sampleBrushMaterial, getBrushMaterialConfig, sampleBrushTexture, getBrushDisplayLimits } = load("render/meteorRenderer.ts");
 const { resolveVisualSignature } = load("engine/visualSignature.ts");
 const { strokeDisplayView } = load("engine/strokeDisplayView.ts");
+const { resolveBrushHeadProfile } = load("engine/brushHeadProfile.ts");
+const { normalizeBrushHead, placeBrushHead } = load("engine/brushHeadSweep.ts");
 
 const MATERIALS = [
   { style: "hard", intensity: 0.65 },
@@ -33,6 +35,20 @@ function near(actual, expected, message, tolerance = 1e-9) {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${message}: ${actual} vs ${expected}`);
 }
 
+// Swept surfaces carry travel-dependent opacity in their gradient stops;
+// compare the effective paint opacity, not only Canvas.globalAlpha.
+const colorAlpha = color => Number(color.match(/\/\s*([\d.]+)\)$/)?.[1] ?? 1);
+const colorWithoutAlpha = color => color.replace(/\s*\/\s*[\d.]+\)$/, ")");
+const paintOpacities = operation => typeof operation.style === "object"
+  ? operation.style.stops.map(([, color]) => operation.alpha * colorAlpha(color))
+  : [operation.alpha * colorAlpha(operation.style)];
+const surfaceWithoutOpacity = ({ alpha, style, ...surface }) => ({
+  ...surface,
+  style: typeof style === "object"
+    ? { ...style, stops: style.stops.map(([position, color]) => [position, colorWithoutAlpha(color)]) }
+    : colorWithoutAlpha(style),
+});
+
 test("duration stays inspectable, increases with dwell and decreases with intensity", () => {
   for (const count of [0, 1, 4, 8, 13]) {
     for (const intensity of [0, 0.5, 1]) {
@@ -41,6 +57,8 @@ test("duration stays inspectable, increases with dwell and decreases with intens
         const timing = getStrokePlayback(makePath({ count, dwell, intensity }));
         assert.ok(Number.isFinite(timing.durationMs));
         assert.ok(timing.durationMs >= 2200 && timing.durationMs <= 14000);
+        assert.equal(timing.durationMs, timing.drawingDurationMs);
+        assert.equal(timing.landingDurationMs, 0);
         assert.ok(timing.durationMs >= previous);
         assert.ok(timing.phaseSpeeds.every((speed) => speed >= 0.12 && speed <= 2));
         assert.ok(timing.phaseDurations.every((duration) => duration > 0));
@@ -98,26 +116,29 @@ test("centerline keeps endpoints, removes duplicate/invalid controls and handles
   assert.ok(sampled.points.every((point) => Number.isFinite(point.x) && Number.isFinite(point.y)));
 });
 
-test("rounded trajectory stays inside the controls' convex hull and is deterministic", () => {
+test("angular trajectory retains exact authored corners and stays on the original polyline", () => {
   const controls = [{ x: 0.1, y: 0.15 }, { x: 0.9, y: 0.25 }, { x: 0.35, y: 0.9 }];
   const triangle = controls.map(({ x, y }) => ({ x: x * 1000, y: y * 600 }));
   for (const sharpness of [0, 0.5, 1]) {
     const sampled = sampleMeteorCenterline(controls, 1000, 600, sharpness);
     assert.deepEqual(sampleMeteorCenterline(controls, 1000, 600, sharpness), sampled);
+    for (const vertex of triangle) assert.ok(sampled.points.some(point => point.x === vertex.x && point.y === vertex.y), "authored corner was rounded away");
+    near(sampled.length, Math.hypot(triangle[1].x - triangle[0].x, triangle[1].y - triangle[0].y)
+      + Math.hypot(triangle[2].x - triangle[1].x, triangle[2].y - triangle[1].y), "exact polyline length");
     for (const point of sampled.points) {
       const sides = triangle.map((a, index) => {
         const b = triangle[(index + 1) % triangle.length];
         return (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x);
       });
-      assert.ok(sides.every((side) => side >= -1e-7) || sides.every((side) => side <= 1e-7), "spline escaped convex hull");
+      assert.ok(sides.every((side) => side >= -1e-7) || sides.every((side) => side <= 1e-7), "polyline escaped convex hull");
     }
   }
 });
 
-test("dense and long paths still produce at most 257 centerline samples", () => {
+test("dense paths preserve every authored corner and add at most 256 detail samples", () => {
   const controls = Array.from({ length: 2000 }, (_, index) => ({ x: index % 2, y: index / 1999 }));
   const sampled = sampleMeteorCenterline(controls, 100000, 100000);
-  assert.ok(sampled.points.length >= 2 && sampled.points.length <= 257);
+  assert.ok(sampled.points.length >= controls.length && sampled.points.length <= controls.length + 256);
   assert.ok(sampled.points.every(({ x, y }) => Number.isFinite(x) && Number.isFinite(y)));
 });
 
@@ -160,9 +181,16 @@ class RecordingContext {
       : pigment;
   }
   fill() { this.frame.push({ kind: "path", points: this.currentPath.map((point) => [...point]), alpha: this.globalAlpha, style: this.style() }); }
-  stroke() { this.frame.push({ kind: "stroke", points: this.currentPath.map((point) => [...point]), alpha: this.globalAlpha, style: this.style(this.strokeStyle), width: this.lineWidth, cap: this.lineCap, clips: structuredClone(this.clips) }); }
+  // clip() replaces its array and copies the path, so snapshots can safely
+  // share that immutable value. Copying the entire swept clip for every hair
+  // segment would turn the recorder into quadratic test-only memory usage.
+  stroke() { this.frame.push({ kind: "stroke", points: this.currentPath.map((point) => [...point]), alpha: this.globalAlpha, style: this.style(this.strokeStyle), width: this.lineWidth, cap: this.lineCap, clips: this.clips }); }
   fillRect(...values) { this.frame.push({ kind: "rect", values, alpha: this.globalAlpha, style: this.style() }); }
   createRadialGradient(...args) {
+    const stops = [];
+    return { args, stops, addColorStop: (...stop) => stops.push(stop) };
+  }
+  createLinearGradient(...args) {
     const stops = [];
     return { args, stops, addColorStop: (...stop) => stops.push(stop) };
   }
@@ -195,22 +223,116 @@ test("zero progress and zero lifecycle opacity clear the canvas without foregrou
 });
 
 test("seeking backwards clears future geometry and revisiting a time gives exactly the same frame", () => {
-  const { draw } = rendererHarness();
+  const { draw, path } = rendererHarness();
   const first = draw(0.25, { retainTrace: true }, 1000);
   assert.ok(first.length > 0);
   draw(0.9, { retainTrace: true }, 9000);
   const backwards = draw(0.25, { retainTrace: true }, 90000);
   assert.deepEqual(backwards, first);
   assert.deepEqual(backwards, rendererHarness().draw(0.25, { retainTrace: true }));
-  // At 25% the center is x=300. Every material surface and its tapered nib
-  // must stop there; no future route or disconnected head is emitted.
+  // At 25% the contact center is x=300. A physical nib may extend beyond its
+  // center, but never beyond its normalized footprint at the existing 12 px
+  // width budget plus the old halo. North maps to the forward travel direction.
+  const footprint = placeBrushHead(normalizeBrushHead(resolveBrushHeadProfile(path)), { x: 0, y: 0, nx: 0, ny: 1, width: 12 });
+  const forwardReach = Math.max(0, ...footprint.map(point => point.x));
+  const furthestNibEdge = 300 + forwardReach * 1.35;
   for (const operation of backwards) {
-    if (operation.kind === "rect") assert.ok(operation.values[0] + operation.values[2] <= 308 + 1e-7);
+    if (operation.kind === "rect") assert.ok(operation.values[0] + operation.values[2] <= furthestNibEdge + 1e-7);
     else for (const command of operation.points) {
-      if (command[0] === "moveTo" || command[0] === "lineTo") assert.ok(command[1] <= 300 + 1e-7);
+      if (command[0] === "moveTo" || command[0] === "lineTo") assert.ok(command[1] <= furthestNibEdge + 1e-7);
       if (command[0] === "arc") near(command[1], 300, "head x at seek position");
     }
   }
+});
+
+test("the inspector's nib outline changes rendered geometry without changing authored attributes or pigment", () => {
+  // Isolate only the derived outline, not a source attribute that also drives
+  // pressure, palette or motion. The module export is local to this loader.
+  const isolatedLoad = createTypeScriptLoader();
+  const profileModule = isolatedLoad("engine/brushHeadProfile.ts");
+  const resolveProfile = profileModule.resolveBrushHeadProfile;
+  const { MeteorRenderer: Renderer } = isolatedLoad("render/meteorRenderer.ts");
+  const artwork = makePath({ intensity: 0.79, dwell: (i) => 140 + i * 47 });
+  const before = structuredClone(artwork);
+  const signature = resolveVisualSignature(artwork);
+  const playback = getStrokePlayback(artwork);
+  const controls = [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }];
+  const controlsBefore = structuredClone(controls);
+  function frame(radii) {
+    profileModule.resolveBrushHeadProfile = (path) => {
+      const profile = resolveProfile(path);
+      return { ...profile, vertices: radii.map((radius, index) => {
+        const angle = (index * 45 - 90) * Math.PI / 180;
+        return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius };
+      }) };
+    };
+    const context = new RecordingContext();
+    const renderer = new Renderer({ style: {}, getContext: () => context });
+    renderer.resize(1000, 600, 2);
+    renderer.draw(0, [artwork], [], { controlPointsOf: () => controls, transformOf: () => ({ scale: 1 }) },
+      null, null, { scale: 1, translateX: 0, translateY: 0 }, new Map([[artwork.id, 0.45]]), { retainTrace: true });
+    renderer.dispose();
+    return context.frame;
+  }
+  const a = frame([1, 0.6, 0.7, 0.8, 0.5, 0.9, 0.4, 0.2]);
+  const b = frame([0.4, 0.9, 1, 0.2, 0.7, 0.5, 0.8, 0.6]);
+  assert.notDeepEqual(a.map(op => op.points), b.map(op => op.points), "the displayed outline must actually control the swept surface");
+  const paint = frame => frame.map(({ kind, alpha, style, width }) => ({ kind, alpha, style, width }));
+  assert.deepEqual(paint(a), paint(b), "changing only the nib must keep all pigment values, layer strengths and pressure-channel widths");
+  assert.deepEqual(artwork, before, "rendering must not mutate the stored artwork");
+  assert.deepEqual(controls, controlsBefore, "the existing travel path is not reshaped");
+  assert.deepEqual(resolveVisualSignature(artwork), signature);
+  assert.deepEqual(getStrokePlayback(artwork), playback);
+});
+
+test("paused-frame cache preserves the raster and hit map, but invalidates every display or authored input", () => {
+  const context = new RecordingContext();
+  const renderer = new MeteorRenderer({ style: {}, getContext: () => context });
+  renderer.resize(200, 100, 1);
+  let paths = [makePath({ count: 4, intensity: 0.65 })];
+  let agents = [];
+  let controls = [{ x: 0.1, y: 0.5 }, { x: 0.9, y: 0.5 }];
+  let transformScale = 1;
+  const store = { controlPointsOf: () => controls, transformOf: () => ({ scale: transformScale }) };
+  let view = { scale: 1, translateX: 0, translateY: 0 };
+  let progress = 0.5, focus = null, filter = null;
+  let options = { retainTrace: true };
+  const draw = (time = 0) => renderer.draw(time, paths, agents, store, focus, filter, view, new Map([["test-meteor", progress]]), options);
+  draw();
+  const first = structuredClone(context.frame);
+  const hit = renderer.hitTest(80, 50, 2);
+  assert.equal(hit, "test-meteor");
+  draw(123456);
+  assert.equal(context.clears, 1, "unchanged paused frame does not rebuild expensive nib geometry");
+  assert.deepEqual(context.frame, first);
+  assert.equal(renderer.hitTest(80, 50, 2), hit, "cache hit must not clear visible picking data");
+  const changes = [
+    ["replay progress", () => { progress = 0.6; }],
+    ["retention", () => { options = { ...options, trailRetention: 0.8 }; }],
+    ["trace mode", () => { options = { ...options, retainTrace: false }; }],
+    ["lifecycle opacity", () => { options = { ...options, opacityById: new Map([["test-meteor", 0.7]]) }; }],
+    ["camera", () => { view = { scale: 1.2, translateX: 0.1, translateY: -0.1 }; }],
+    ["per-path camera", () => { options = { ...options, viewById: new Map([["test-meteor", { scale: 1.1, translateX: 0.04, translateY: 0.06 }]]) }; }],
+    ["selection", () => { focus = "test-meteor"; }],
+    ["agent filter", () => { filter = "test-agent"; }],
+    ["edited controls", () => { controls = [{ x: 0.1, y: 0.3 }, { x: 0.9, y: 0.6 }]; }],
+    ["transform width scale", () => { transformScale = 0.5; }],
+    ["authored stroke refresh", () => { paths = paths.map(path => ({ ...path, points: path.points.map(point => ({ ...point, confidence: 0.6 })) })); }],
+    ["agent refresh", () => { agents = [...agents]; }],
+    ["viewport resize", () => { renderer.resize(220, 110, 1); }],
+    ["pixel density", () => { renderer.resize(220, 110, 2); }],
+    ["clear canvas", () => { paths = []; }],
+  ];
+  for (const [name, change] of changes) {
+    const clears = context.clears;
+    change(); draw();
+    assert.equal(context.clears, clears + 1, `${name} must invalidate the retained frame`);
+    draw(999999);
+    assert.equal(context.clears, clears + 1, `${name} settles into a reusable raster`);
+  }
+  assert.deepEqual(context.frame, []);
+  assert.equal(renderer.hitTest(80, 50, 2), null, "cleared strokes cannot remain in the cached hit map");
+  renderer.dispose();
 });
 
 test("a single-point meteor is finite and full paths have bounded foreground work", () => {
@@ -218,9 +340,10 @@ test("a single-point meteor is finite and full paths have bounded foreground wor
   assert.equal(point.length, 1, "a genuine zero-length gesture should be one compact filled nib");
   assert.ok(!JSON.stringify(point).includes("null"), "NaN would serialize as null");
   const controls = Array.from({ length: 1000 }, (_, index) => ({ x: index % 2, y: index / 999 }));
+  const sampledSegments = sampleMeteorCenterline(controls, 1000, 600).points.length - 1;
   for (const { intensity } of MATERIALS) {
     const frame = rendererHarness(controls, { intensity }).draw(1, { retainTrace: true });
-    assert.ok(frame.length <= (256 + 4) * 8, "at most 256 centerline segments + 4 nib samples, with eight material/deposit layers");
+    assert.ok(frame.length <= (sampledSegments + 4) * 8, "at most sampled source segments + 4 nib samples, with eight material/deposit layers");
     assert.ok(frame.every((operation) => Number.isFinite(operation.alpha) && operation.alpha >= 0 && operation.alpha <= 1));
   }
 });
@@ -362,8 +485,12 @@ test("deposits and dry channels survive seeking without detached marks or a shar
     assert.ok(!first.some((operation) => operation.kind === "rect" || operation.points?.some((point) => ["arc", "ellipse"].includes(point[0]))), "materials must not emit dots, stamps or detached highlights");
     pigmentCounts.set(style, new Set(first.map((operation) => operation.style)).size);
     const faded = draw(0.63, { retainTrace: true, opacityById: new Map([[path.id, 0.4]]) });
-    assert.deepEqual(faded.map(({ alpha, ...surface }) => surface), first.map(({ alpha, ...surface }) => surface), "lifecycle opacity must not change the material structure");
-    faded.forEach((operation, index) => near(operation.alpha, first[index].alpha * 0.4, "whole-material lifecycle fade", 1e-8));
+    assert.deepEqual(faded.map(surfaceWithoutOpacity), first.map(surfaceWithoutOpacity), "lifecycle opacity must not change the material structure or pigment");
+    faded.forEach((operation, index) => {
+      const initial = paintOpacities(first[index]), current = paintOpacities(operation);
+      assert.equal(current.length, initial.length);
+      current.forEach((alpha, stop) => near(alpha, initial[stop] * 0.4, "whole-material lifecycle fade at every travel stop", 0.0001));
+    });
     const fibers = first.filter((operation) => operation.kind === "stroke");
     if (style === "soft" || style === "texture") {
       assert.ok(new Set(fibers.map((operation) => operation.width.toFixed(4))).size > 3, "pressure and dryness must vary actual channel widths");
@@ -420,31 +547,29 @@ test("each material remains deterministic when seeking and leaves future traject
     assert.deepEqual(draw(0.25, { retainTrace: true }, 30000), first, `${style} backwards seek`);
     assert.deepEqual(draw(0), [], `${style} zero progress`);
     assert.deepEqual(draw(0.6, { opacityById: new Map([[path.id, 0]]) }), [], `${style} zero opacity`);
+    const footprint = placeBrushHead(normalizeBrushHead(resolveBrushHeadProfile(path)), { x: 0, y: 0, nx: 0, ny: 1, width: 12 });
+    const headLimit = 300 + Math.max(0, ...footprint.map(point => point.x)) * 1.35;
     for (const operation of first) {
-      if (operation.kind === "rect") assert.ok(operation.values[0] + operation.values[2] <= 312 + 1e-7);
+      if (operation.kind === "rect") assert.ok(operation.values[0] + operation.values[2] <= headLimit + 1e-7);
       else for (const command of operation.points) {
-        if (command[0] === "moveTo" || command[0] === "lineTo") assert.ok(command[1] <= 312 + 1e-7, `${style} rendered future route`);
+        if (command[0] === "moveTo" || command[0] === "lineTo") assert.ok(command[1] <= headLimit + 1e-7, `${style} rendered future route beyond the real nib footprint`);
         if (command[0] === "quadraticCurveTo" || command[0] === "bezierCurveTo") {
-          for (let index = 1; index < command.length; index += 2) assert.ok(command[index] <= 312 + 1e-7);
+          for (let index = 1; index < command.length; index += 2) assert.ok(command[index] <= headLimit + 1e-7);
         }
       }
     }
   }
 });
 
-test("hit testing follows the rounded visible centerline rather than the old control-point corner", () => {
+test("hit testing follows exact visible corners and never the former rounded shortcut", () => {
   const controls = [{ x: 0.1, y: 0.1 }, { x: 0.9, y: 0.1 }, { x: 0.9, y: 0.9 }];
   const { renderer, path, draw } = rendererHarness(controls);
   const signature = resolveVisualSignature(path);
   const centerline = sampleMeteorCenterline(controls, 1000, 600, signature.turn_sharpness);
-  const roundedPoint = centerline.points.reduce((best, point) => {
-    const gap = Math.min(Math.abs(point.y - 60), Math.abs(point.x - 900));
-    return gap > best.gap ? { ...point, gap } : best;
-  }, { x: 0, y: 0, gap: 0 });
-  assert.ok(roundedPoint.gap > 12, "fixture must differ from the former hit map");
+  assert.ok(centerline.points.some(point => point.x === 900 && point.y === 60));
   draw(1, { retainTrace: true });
-  assert.equal(renderer.hitTest(roundedPoint.x, roundedPoint.y), path.id);
-  assert.equal(renderer.hitTest(900, 60), null, "invisible old corner must not be clickable");
+  assert.equal(renderer.hitTest(900, 60, 2), path.id, "the original corner is visible and clickable");
+  assert.equal(renderer.hitTest(860, 100, 2), null, "the removed quadratic shortcut cannot intercept clicks");
 });
 
 test("hit testing respects reveal, delayed tail erosion, lifecycle opacity and CSS coordinates under zoom/pan", () => {
@@ -485,10 +610,11 @@ test("all animated materials default to 20 percent retention, then feather their
       for (const frame of frames) {
         const rear = frame.find((operation) => operation.kind === "path");
         assert.ok(rear, `${style} has a connected rear surface`);
-        near(rear.alpha, 0.035, `${style} rear halo does not age before 20%`);
+        paintOpacities(rear).forEach(alpha => near(alpha, 0.035, `${style} rear halo does not age before 20%`));
       }
       const halfFaded = draw(0.23).find((operation) => operation.kind === "path");
-      assert.ok(halfFaded.alpha > 0 && halfFaded.alpha < 0.035, `${style} rear fades only after threshold`);
+      const rearAlpha = paintOpacities(halfFaded)[0];
+      assert.ok(rearAlpha > 0 && rearAlpha < 0.035, `${style} rear fades only after threshold`);
       draw(1);
       assert.equal(renderer.hitTest(100, 300, 0.1), null, `${style} erased rear cannot be selected`);
       assert.deepEqual(draw(0.1, {}, 99999), frames[1], `${style} replay restores the full early trace`);

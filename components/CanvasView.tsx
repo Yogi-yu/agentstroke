@@ -189,6 +189,12 @@ const PlanarCanvasView = forwardRef<CanvasHandle, Props>(function PlanarCanvasVi
     let previousTime = 0;
     let initialPaths = true;
     let controlledClock: { id: string; key: number; progress: number } | null = null;
+    let controlledWasPlaying = false;
+    let lastProgressReportAt = -Infinity;
+    let lastReportedProgress = -1;
+    let lastDiagnosticAt = -Infinity;
+    const frameIntervals: number[] = [];
+    let frameIntervalSum = 0;
     const flights = new Map<string, { elapsed: number; timing: StrokePlaybackTiming }>();
     const distances = new Map<string, number>();
     const opacities = new Map<string, number>();
@@ -204,6 +210,10 @@ const PlanarCanvasView = forwardRef<CanvasHandle, Props>(function PlanarCanvasVi
     document.addEventListener("visibilitychange", visibilityChanged);
     const loop = (now: number) => {
       const delta = previousTime === 0 ? 0 : Math.max(0, now - previousTime);
+      if (delta > 0 && !document.hidden) {
+        frameIntervals.push(delta); frameIntervalSum += delta;
+        if (frameIntervals.length > 30) frameIntervalSum -= frameIntervals.shift()!;
+      }
       const motionDelta = scaledMotionDelta(delta, motionSpeedRef.current);
       previousTime = now;
       const store = storeRef.current;
@@ -275,11 +285,21 @@ const PlanarCanvasView = forwardRef<CanvasHandle, Props>(function PlanarCanvasVi
           // not drop elapsed frames or change a stroke's intrinsic duration.
           const clock = controlledClock!;
           clock.progress = Math.max(0, Math.min(1, !controls.playing
-            ? controls.progress
+            ? reset ? controls.progress : clock.progress
             : clock.progress + (reset ? 0 : delta * controls.speed / flight.timing.durationMs)));
           timeProgress = clock.progress;
           frameTime = timeProgress * flight.timing.durationMs;
-          if (controls.playing && path === visiblePaths[0]) controls.onProgress(timeProgress);
+          // The canvas clock still advances every frame. React only needs a
+          // readable timeline update, not a full component commit at 60 Hz.
+          // Publish exact seek/replay, pause and end values immediately.
+          const pausedNow = controlledWasPlaying && !controls.playing;
+          const publish = reset || pausedNow || timeProgress >= 1 || now - lastProgressReportAt >= 1000 / 15;
+          if (path === visiblePaths[0] && publish && (reset || pausedNow || timeProgress !== lastReportedProgress)) {
+            controls.onProgress(timeProgress);
+            lastProgressReportAt = now;
+            lastReportedProgress = timeProgress;
+          }
+          controlledWasPlaying = controls.playing;
         } else if (presentation === "sky") {
           // A comparison sky keeps all ten results visible after arrival.
           // Replaying it resets only this local clock, not model generation.
@@ -327,8 +347,23 @@ const PlanarCanvasView = forwardRef<CanvasHandle, Props>(function PlanarCanvasVi
           renderView,
           distances,
           { retainTrace: presentation !== "animated", trailRetention: trailRetentionRef.current, opacityById: opacities,
+            showNib: presentation !== "static" && presentation !== "complete",
+            // Studio already exposes the shape in its sidebar. Keep the
+            // magnified contact inside dedicated/embedded playback canvases.
+            inspectNib: !!controls,
             viewById: controls ? undefined : layout ? layoutViews : readableViews },
         );
+        // Read-only DOM diagnostics for real-device QA, sampled separately
+        // from drawing. These never alter the animation or React timeline.
+        if (now - lastDiagnosticAt >= 500 && brushCanvas.dataset && typeof brushRendererRef.current.getRenderStats === "function") {
+          const stats = brushRendererRef.current.getRenderStats();
+          brushCanvas.dataset.brushFrameMs = stats.frameMs.toFixed(3);
+          brushCanvas.dataset.brushCacheBakes = String(stats.tileBakes);
+          brushCanvas.dataset.brushCacheTiles = String(stats.tiles);
+          brushCanvas.dataset.brushFrameBakes = String(stats.frameTileBakes);
+          brushCanvas.dataset.animationFrameMs = (frameIntervals.length ? frameIntervalSum / frameIntervals.length : 0).toFixed(2);
+          lastDiagnosticAt = now;
+        }
         brushDirtyRef.current = false;
       }
       raf = requestAnimationFrame(loop);

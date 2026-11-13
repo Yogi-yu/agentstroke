@@ -117,7 +117,7 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
   curvature: {
     definition: "Measured average turning between consecutive source segments; distinct from the signed curvature-bias attribute.",
     geometry: "This contributes to the source turn-angle descriptor. The visible route now comes from its six-family motion pattern, not a direct tracing of all source corners.",
-    motion: "It does not create extra orbits or set speed. Curvature bias controls bend direction/span, while sharpness rounds local joins.",
+    motion: "It does not create extra orbits or set speed. Curvature bias controls bend direction/span. Sharpness remains a source descriptor; the renderer follows the generated centerline's corners exactly.",
     ranges: "0 = straight source path; 1 = near-reversing source path.",
     highLow: "High → larger recorded angle descriptor. Low → smaller descriptor. This is not a literal count of visible bends.",
   },
@@ -166,14 +166,14 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
   crossings: {
     definition: "The maximum permitted self-crossings, together with the actual count on this generated centerline.",
     geometry: "Folds and wandering paths can naturally revisit earlier legs. Glides, arcs, waves and expanding orbits need not consume the budget. Excess-crossing candidates are restrained rather than adding figure-eight modules.",
-    motion: "One head revisits a coordinate at a later time. Actual means centerline intersections before bounded corner rounding, not branches or multiple brush strokes.",
+    motion: "One head revisits a coordinate at a later time. Actual means intersections of the generated centerline, whose original corners are preserved during drawing, not branches or multiple brush strokes.",
     ranges: "Entropy <0.38 → ceiling 0; 0.38–0.72 → ceiling 0–4; >0.72 → ceiling 5–8 only when long, otherwise at most 4. Actual is always ≤ ceiling.",
     highLow: "High → overlaps are permitted, not required. Zero → no self-crossings. The selected motion family is preserved.",
   },
   brush_head: {
-    definition: "The physical material of the moving nib. The head is the front of its ribbon, not a detached dot overlay.",
-    geometry: "Calligraphy: matte ink, a loaded asymmetric belly, a pointed finish and open dry-bristle channels. The other materials retain their chisel, soft ink, wet sediment and grooved texture surfaces.",
-    motion: "A calligraphy brush presses, splays and lifts along the same centerline. Entropy and low confidence open dry channels; pressure and intensity consolidate the pigment. No second route or detached brush stamp is created.",
+    definition: "The attribute-shaped polygon that deposits ink, together with its physical material. The visible nib is the same contact contour that makes the stroke, not a detached dot overlay.",
+    geometry: "Eight attribute-derived radii form the connected polygon shown in the brush-head preview. Calligraphy keeps its matte ink and open dry-bristle channels; the other materials retain their hard, soft, wet-sediment and grooved surfaces.",
+    motion: "The polygon keeps the bearing set by the initial travel direction while its center follows every original corner. Turning changes which face sweeps across the canvas; it does not spin the nib into a rounded join or add zigzags. Original pressure changes size, while pigment and timing remain unchanged.",
     ranges: "A persisted platform assignment gives four of every ten Sky strokes the calligraphy material. The remaining strokes use intensity thresholds 0.70, 0.76 and 0.83 for their original material. This choice never changes when filtering or replaying.",
     highLow: "Materials differ in contour, pressure response, pigment and groove structure—not simply opacity. A genuine zero-length gesture remains a compact point.",
   },
@@ -199,16 +199,16 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
     highLow: "More dwell generally gives a longer reveal; higher intensity generally makes it faster. The animation stays within a readable duration range.",
   },
   turn_system: {
-    definition: "The principal-turn budget, source turn-angle descriptor and local corner sharpness; not a count of every sampled curve segment.",
-    geometry: "Turn and return budgets jointly set fold corners and wave lobes; the turn budget sets wander corners. Each stays within four principal changes. A glide or arc need not use every turn. Bounded joins round corners without overshooting or branching.",
-    motion: "One head follows the complete family. Return budget and curvature govern broader angular travel; timing is independent.",
+    definition: "The principal-turn budget, source turn-angle descriptor and source sharpness; not a count of every sampled curve segment or a renderer rounding control.",
+    geometry: "Turn and return budgets jointly set fold corners and wave lobes; the turn budget sets wander corners. Each stays within four principal changes. A glide or arc need not use every turn. The renderer follows every original centerline corner exactly, without rounding shortcuts or adding zigzags.",
+    motion: "One head follows the complete family and keeps its initial bearing as travel changes direction. Return budget and curvature govern the route; timing is independent.",
     ranges: "Source turns use a modulo-four remainder: 1–4, or 0 for at most two anchors. Source angle 0°–179°; sharpness 0–1.",
-    highLow: "Larger budget → more permitted principal changes. Higher sharpness → tighter local joins; lower sharpness → broader rounding.",
+    highLow: "Larger budget → more permitted principal changes. Higher or lower sharpness describes the source; neither value rounds or reshapes the rendered centerline.",
   },
   direction_system: {
     definition: "Overall orientation from drift bias, plus the motion-family return budget.",
     geometry: "Drift bias rotates the complete centerline through 360°. The family interprets its return budget rather than being replaced by a standard hairpin sequence.",
-    motion: "Direct, sweeping, wavy, folded, orbiting and wandering travel remain distinct after rotation.",
+    motion: "Direct, sweeping, wavy, folded, orbiting and wandering travel remain distinct after rotation. The polygon's bearing is set by the initial travel direction and stays fixed through subsequent turns.",
     ranges: "Orientation 0°–360°. Return budget 0–4, capped at 1 for short and 2 for medium strokes.",
     highLow: "Drift changes the global heading. A higher return budget can extend angular travel, but is not an exact U-turn count.",
   },
@@ -343,22 +343,22 @@ export default function StrokeDetailPage() {
       intensity: signature.brush_style === "calligraphy"
         ? `This work has a persisted calligraphy assignment from the platform's 40% material mix. Average intensity ${m.intensity.toFixed(2)} controls pigment loading, not that assignment. ${MATERIAL_EFFECTS.calligraphy} Intensity also contributes to the ${timing ? fmtTime(timing.durationMs) : "recorded"} reveal duration.`
         : `Average intensity ${m.intensity.toFixed(2)} selects ${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} It also contributes to the ${timing ? fmtTime(timing.durationMs) : "recorded"} reveal duration.`,
-      curvature: `Measured source curvature ${m.curvature.toFixed(2)} contributes to the ${signature.turn_angle_deg.toFixed(0)}° turn-angle descriptor. The separately derived sharpness ${signature.turn_sharpness.toFixed(2)} controls the meteor's bounded corner rounding.`,
+      curvature: `Measured source curvature ${m.curvature.toFixed(2)} contributes to the ${signature.turn_angle_deg.toFixed(0)}° turn-angle descriptor. The separately derived sharpness ${signature.turn_sharpness.toFixed(2)} remains a source descriptor, not a renderer rounding control. Every original corner of the generated centerline is traversed exactly.`,
       branching: `The source records branching density ${m.branching.toFixed(2)} and ${signature.brush_heads.join(" + ")} nib metadata. These remain inspectable, while the displayed meteor follows one continuous, unbranched centerline.`,
       stability: `Motion stability ${m.stability.toFixed(3)} falls in the ${m.stability < WIDTH_STABILITY_CONSTANT_THRESHOLD ? "extremely low / constant" : m.stability < WIDTH_STABILITY_FREQUENT_THRESHOLD ? "1–3 transition" : "5–8 transition"} band and selects ${signature.width_change_count} press/lift transition${signature.width_change_count === 1 ? "" : "s"}. ${signature.width_change_count ? "Each transition alternates a 0.15–0.30× valley with a 1.85–2.20× peak." : "Pressure is held at 1×."} Relative phase-speed weights remain ${speedRange}, independently of width.`,
       motion_pattern: `${stroke?.geometry_mode ?? "linear (legacy default)"} selects ${family}. ${MOTION_EFFECTS[pattern]} This realization has ${actualCrossings} centerline crossings under a ceiling of ${crossingBudget}.`,
       motion_amplitude: `${m.entropy.toFixed(2)} × 0.62 + (1 − ${m.confidence.toFixed(2)}) × 0.23 + |${fmtSigned(signature.motion_curvature ?? 0)}| × 0.15 gives amplitude ${(signature.motion_amplitude ?? 0).toFixed(3)}. ${MOTION_EFFECTS[pattern]}`,
       curvature_bias: `Curvature bias ${fmtSigned(signature.motion_curvature ?? 0)} chooses this family's local bend/winding side and contributes ${(Math.abs(signature.motion_curvature ?? 0) * 0.15).toFixed(3)} to amplitude. ${pattern === "arc" ? "Its magnitude also directly widens this arc's sweep." : "It is distinct from the measured source-curvature descriptor."} Global rotation remains ${signature.direction_angle_deg.toFixed(0)}°.`,
       motion_variation: `Motion variation ${m.motionVariation.toFixed(2)} gives a return budget of ${motion?.reversalBudget ?? signature.reversal_count} after the ${signature.length_class} length cap. ${MOTION_EFFECTS[pattern]} It also ${signature.length_class === "long" ? `selects ${signature.color_count} pigments` : "remains color-gated to one pigment"}.`,
-      line_length: `${stroke?.generation_mode ? `The agent returned ${m.n} anchors, setting a target of ${agentAuthoredDistance(m.n).toFixed(3)} canvas units on the contrast curve.` : "This archived stroke uses the legacy dwell/depth mapping."} Source length ${signature.length.toFixed(2)} is labelled ${signature.length_class}. After boundary fitting, the centerline travels ${travelledDistance.toFixed(3)} units before corner rounding and camera zoom.`,
+      line_length: `${stroke?.generation_mode ? `The agent returned ${m.n} anchors, setting a target of ${agentAuthoredDistance(m.n).toFixed(3)} canvas units on the contrast curve.` : "This archived stroke uses the legacy dwell/depth mapping."} Source length ${signature.length.toFixed(2)} is labelled ${signature.length_class}. After boundary fitting, the centerline travels ${travelledDistance.toFixed(3)} units before camera zoom. Rendering preserves those segments and their original corners.`,
       line_width: `The source width is ${(signature.width_ratio * 100).toFixed(2)}% of the canvas side. This source value and pressure profile are remapped through the ${signature.brush_style} nib's geometry, with a maximum body width of 12 CSS pixels across all materials.`,
       width_variation: `${signature.width_change_count === 0 ? "This stroke holds pressure at 1× because its stability is below 0.02; its material still shapes the outline." : `This stroke has ${signature.width_change_count} pronounced press/lift transitions: ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}. Its pressure peak-to-valley contrast is ${(Math.max(...signature.width_profile) / Math.min(...signature.width_profile)).toFixed(1)}:1, smoothly interpolated without mean normalization.`} The centerline is unchanged; physical width stays inside the material's 12-pixel cap.`,
-      crossings: `Actual centerline crossings: ${actualCrossings}. Maximum permitted: ${crossingBudget}, derived from entropy ${m.entropy.toFixed(2)} and ${signature.length_class} length. ${family} uses only the intersections natural to its complete route; unused budget does not add loops. Counted before bounded corner rounding.`,
-      brush_head: `${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} ${signature.brush_style === "calligraphy" ? "The platform assigned this work to the 40% calligraphy mix; its original agent-authored attributes and route remain unchanged." : "This work retains its intensity-selected original material."} The original ${signature.brush_heads.join(" + ")} primitive-head metadata remains inspectable without stamping detached shapes onto the route.`,
+      crossings: `Actual centerline crossings: ${actualCrossings}. Maximum permitted: ${crossingBudget}, derived from entropy ${m.entropy.toFixed(2)} and ${signature.length_class} length. ${family} uses only the intersections natural to its complete route; unused budget does not add loops. The renderer preserves this centerline and its original corners.`,
+      brush_head: `${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} ${signature.brush_style === "calligraphy" ? "The platform assigned this work to the 40% calligraphy mix; its original agent-authored attributes and route remain unchanged." : "This work retains its intensity-selected original material."} The exact attribute-shaped polygon keeps its initial bearing while travel turns. It deposits ink along the existing centerline without adding zigzags or rounding its corners. The original ${signature.brush_heads.join(" + ")} primitive-head metadata remains inspectable.`,
       color_system: `${colorState} The saved bright/dark allocation changes color only; the route, pressure, material and timing are unchanged.`,
       draw_speed: `This meteor travels through ${signature.speed_profile.length} phases with relative speed weights ${signature.speed_profile.map((value) => value.toFixed(2)).join(" → ")}, derived from per-anchor dwell times. Each phase covers an equal share of the route; a larger weight takes less time.`,
       drawing_duration: timing ? `${m.duration}ms of recorded dwell and average intensity ${m.intensity.toFixed(2)} produce a ${fmtTime(timing.durationMs)} reveal at 1×. Playback speed changes the viewing rate; the original timing remains part of this stroke.` : "",
-      turn_system: `The turn budget is ${motion?.turnBudget ?? signature.turn_count}, interpreted by ${family.toLowerCase()} rather than forced into identical corners. Source angle is ${signature.turn_angle_deg.toFixed(0)}°; sharpness ${signature.turn_sharpness.toFixed(2)} determines bounded local rounding. ${MOTION_EFFECTS[pattern]}`,
+      turn_system: `The turn budget is ${motion?.turnBudget ?? signature.turn_count}, interpreted by ${family.toLowerCase()} rather than forced into identical corners. Source angle is ${signature.turn_angle_deg.toFixed(0)}°; sharpness ${signature.turn_sharpness.toFixed(2)} is descriptive, not a renderer rounding control. The same polygon keeps its initial bearing and traverses every original corner exactly, with no extra zigzags. ${MOTION_EFFECTS[pattern]}`,
       direction_system: `Drift bias ${fmtSigned(stroke?.mood?.drift_bias ?? 0)} rotates the complete ${family.toLowerCase()} to ${signature.direction_angle_deg.toFixed(0)}°. Its return budget is ${motion?.reversalBudget ?? signature.reversal_count}, not an exact U-turn count. ${MOTION_EFFECTS[pattern]}`,
     };
   }, [m, signature, timing, stroke, motion, travelledDistance]);
@@ -404,7 +404,7 @@ export default function StrokeDetailPage() {
     },
     ...(signature ? [{
       title: "How the meteor retains its source attributes",
-      text: `Source length ${signature.length.toFixed(2)} produces a ${signature.length_class} gesture travelling ${travelledDistance.toFixed(3)} normalized square-canvas units before corner rounding. Its ${MOTION_LABELS[motion?.pattern ?? "glide"].toLowerCase()} family is preserved with ${motion?.crossingsUsed ?? 0} crossings under a ${motion?.crossingBudget ?? 0} ceiling. Motion and length select ${signature.color_count} seeded colors. ${MATERIAL_EFFECTS[signature.brush_style]}`,
+      text: `Source length ${signature.length.toFixed(2)} produces a ${signature.length_class} gesture travelling ${travelledDistance.toFixed(3)} normalized square-canvas units, with every original corner preserved. Its ${MOTION_LABELS[motion?.pattern ?? "glide"].toLowerCase()} family is preserved with ${motion?.crossingsUsed ?? 0} crossings under a ${motion?.crossingBudget ?? 0} ceiling. Motion and length select ${signature.color_count} seeded colors. ${MATERIAL_EFFECTS[signature.brush_style]}`,
     }] : []),
   ];
 

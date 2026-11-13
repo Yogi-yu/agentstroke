@@ -9,6 +9,8 @@
 
 import { useMemo } from "react";
 import type { StrokeTransform, TransitionPath } from "@/lib/types";
+import { resolveBrushHeadProfile } from "@/engine/brushHeadProfile";
+import BrushHeadPreview from "@/components/BrushHeadPreview";
 
 interface Props {
   stroke: TransitionPath;
@@ -31,6 +33,7 @@ export default function StrokeInspector({
   onResetTransform,
   onClose,
 }: Props) {
+  const brushHead = useMemo(() => resolveBrushHeadProfile(stroke), [stroke]);
   const { entropyAvg, confidenceAvg, durationMs } = useMemo(() => {
     const pts = stroke.points;
     const n = pts.length || 1;
@@ -42,7 +45,7 @@ export default function StrokeInspector({
   }, [stroke]);
 
   return (
-    <div className={`panel inspector${editMode ? " editing" : ""}`}>
+    <div className={`panel inspector${editMode ? " editing" : ""}`} data-testid="stroke-inspector">
       <div className="panel-head">
         <h2>Stroke {editMode && <em className="edit-flag">editing</em>}</h2>
         <div className="insp-head-actions">
@@ -66,6 +69,8 @@ export default function StrokeInspector({
           <span className="arrow">→</span>
           <b>{stroke.to}</b>
         </div>
+
+        <BrushHeadPreview key={stroke.id} profile={brushHead} />
 
         <div className="insp-grid">
           <div><span>agent</span><i>{agentName}</i></div>
