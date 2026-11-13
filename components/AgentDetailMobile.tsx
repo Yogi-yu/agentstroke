@@ -20,17 +20,25 @@ import AgentCreationForm from "@/components/AgentCreationForm";
 import AgentChatPanel from "@/components/AgentChatPanel";
 import StrokePlayerPanel from "@/components/StrokePlayerPanel";
 import StorageNotice from "@/components/StorageNotice";
-import type { Agent } from "@/lib/types";
+import type { Agent, AgentProfile } from "@/lib/types";
 import { agentRenderStyle, categoryLabel } from "@/lib/agents";
+import { canvasAuthors } from "@/lib/canvasAuthors";
 import { modelSpec } from "@/lib/openrouter/models";
 import { appStore, useApp } from "@/state/appStore";
 
 const noop = () => {};
 
-export default function AgentDetailMobile({ id }: { id: string }) {
+export default function AgentDetailMobile({ id, profile, profileLoading, profileError, active }: {
+  id: string;
+  profile?: AgentProfile | null;
+  profileLoading?: boolean;
+  profileError?: string;
+  active?: boolean;
+}) {
   const router = useRouter();
-  const { agents, strokes, ready, generating, generationError } = useApp();
-  const agent = agents.find((a) => a.id === id) ?? null;
+  const { agents, authors, strokes, ready, generating, generationError } = useApp();
+  const agent = profile === undefined ? canvasAuthors(agents, authors).find((a) => a.id === id) ?? null : profile;
+  const agentActive = active ?? agents.some(a => a.id === id);
   const agentStrokes = useMemo(() => strokes.filter((s) => s.agent_id === id), [strokes, id]);
   const renderAgents = useMemo<Agent[]>(() => agent ? [{ id: agent.id, style: agentRenderStyle(agent.category) }] : [], [agent]);
 
@@ -92,7 +100,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
         <div className="adm-title">
           <span className="adm-name">{agent?.name ?? id}</span>
           <span className="adm-model">
-            {agent ? modelSpec(agent.model).label : ready ? "agent not found" : "loading…"}
+            {agent ? `${modelSpec(agent.model).label}${agentActive ? "" : " · saved author"}` : profileError || (profileLoading || !ready ? "loading…" : "agent not found")}
           </span>
         </div>
         <button
@@ -124,7 +132,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
           <div className="adm-info-row"><span>revenue impact</span><p>{agent.revenue_impact}</p></div>
           <div className="adm-info-row"><span>model</span><p>{modelSpec(agent.model).label} · {agent.model}</p></div>
           <div className="adm-info-row"><span>strokes</span><p>{agentStrokes.length}</p></div>
-          <button className="btn danger adm-del" onClick={() => { appStore.dismissStorageError(); setConfirmDeleteAgent(true); }}>Remove available agent</button>
+          <button className="btn danger adm-del" disabled={!agentActive} onClick={() => { appStore.dismissStorageError(); setConfirmDeleteAgent(true); }}>Remove available agent</button>
         </div>
       )}
 
@@ -195,7 +203,7 @@ export default function AgentDetailMobile({ id }: { id: string }) {
           <div className="modal" role="dialog" aria-modal="true" onClick={(e) => e.stopPropagation()}>
             <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
-              This removes <b>{agent?.name ?? id}</b> from the shared available pool for everyone. All artworks remain on the shared canvas and in the Archive. Anyone can attract this agent again later.
+              This removes <b>{agent?.name ?? id}</b> from the shared available pool for everyone. Artworks stay saved in Archive with their original authorship. Automatic recruitment may fill the vacancy at the next server check.
             </p>
             <StorageNotice />
             <div className="modal-actions">

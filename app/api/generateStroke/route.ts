@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { listAgents, listStrokes, getAgent, addStroke, restoreStroke, canvasRevision } from "@/lib/store";
+import { listAgents, listStrokes, getAgent, addStroke, restoreStroke, canvasRevision, touchAgentActivity } from "@/lib/store";
 import { generateStroke } from "@/lib/strokegen";
 import { classifySemanticGenerationError } from "@/lib/semanticPath";
 import { createPublishedCanvas } from "@/lib/publishedCanvas";
@@ -54,6 +54,7 @@ export async function POST(request: Request) {
     const requested = typeof body.agent_id === "string" ? body.agent_id.trim() : "";
     const agent = requested ? await getAgent(owner, requested) : agents[Math.floor(Math.random() * agents.length)];
     if (!agent) return NextResponse.json({ error: "Agent not found." }, { status: 404 });
+    await touchAgentActivity(owner,agent.id);
     const existing = await listStrokes(owner);
     const timestamp = typeof body.timestamp === "number" && Number.isFinite(body.timestamp) ? body.timestamp : Date.now();
     let stroke: TransitionPath;
@@ -68,7 +69,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: safe.message, code: safe.code, retryable: safe.retryable }, { status });
     }
     // Storage failures are not model failures: never claim the work was saved.
-    const saved = await addStroke(owner, stroke, { expectedRevision: revision });
+    const saved = await addStroke(owner, stroke, { expectedRevision: revision, author:agent });
     if (await canvasRevision(owner) !== revision) return clearedResponse(true);
     return NextResponse.json({ stroke: saved, reused: false, canvasRevision: revision });
   });

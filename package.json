@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "NOEMA_AUTOPILOT_RUNTIME=1 next start",
     "lint": "next lint",
     "test:meteor": "node --test tests/meteor.test.cjs",
     "test": "node --test tests/*.test.cjs"

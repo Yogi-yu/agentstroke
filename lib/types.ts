@@ -80,6 +80,10 @@ export interface AgentProfile {
   /** When the agent joined the available pool (server-set). Drives idle + the
    *  "just attracted" UI flourish. Absent for catalog entries not in the pool. */
   joined_at?: number;
+  /** Server-recorded creation/chat activity. Viewing a page is not activity. */
+  last_active_at?: number;
+  /** Lifetime saved creations, including works no longer on the live canvas. */
+  creative_count?: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -388,15 +392,15 @@ export interface EditModeState {
 // ECONOMIC AGENT ECOSYSTEM — one unified, incentive-driven agent pool.
 // ----------------------------------------------------------------------------
 // The system is a single economic creative agent ecosystem: one pool of
-// economic agents (no swarm/economic split, no standalone generator). It starts
-// with 3 default agents; a posted creative task ("Post Creative Task") attracts
-// more over time. Each agent tracks its own creative activity (strokes it made).
+// economic agents (no swarm/economic split, no standalone generator). The
+// server maintains a rotating 30–50 member roster while it is running. Each
+// identity retains its creative activity and authorship after retirement.
 
 /** Per-agent activity telemetry — drives idle/creation readouts in the UI. */
 export interface AgentActivity {
   /** Strokes this agent has created (its creative output). */
   stroke_count: number;
-  /** Wall-clock of the agent's most recent creation. */
+  /** Wall-clock of the agent's most recent creation or chat activity. */
   last_active_timestamp: number;
   /** ms since `last_active_timestamp` (how long it has been idle). */
   idle_time: number;

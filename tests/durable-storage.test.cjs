@@ -94,7 +94,7 @@ test('more than 500 generated works remain archived without eviction; pages do n
   const {store} = fixture(t);
   await store.clearStrokes(A);
   await Promise.all(Array.from({length:505},(_,i)=>store.addStroke(A,stroke(`retained-${String(i).padStart(4,'0')}`))));
-  assert.equal((await store.listStrokes(A)).length,505);
+  assert.equal((await store.listStrokes(A)).length,50,'the shared presentation is bounded, not the artwork archive');
   const page=await store.listArchivedStrokes(A,{limit:100,offset:400});
   assert.equal(page.total,506); assert.equal(page.strokes.length,100);
   assert.equal((await store.listArchivedStrokes(B)).total,1);

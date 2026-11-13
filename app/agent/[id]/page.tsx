@@ -24,6 +24,7 @@ import { agentRenderStyle, categoryHue, categoryLabel } from "@/lib/agents";
 import { modelSpec } from "@/lib/openrouter/models";
 import { IDENTITY_TRANSFORM } from "@/store/transformStore";
 import { appStore, useApp } from "@/state/appStore";
+import { useAgentProfile } from "@/state/useAgentProfile";
 
 const ROTATE_STEP = Math.PI / 24; // 7.5° per rotate press
 
@@ -45,7 +46,7 @@ export default function AgentDetailPage() {
   const id = params.id;
   const router = useRouter();
   const isMobile = useIsMobile();
-  const { agents, strokes, ready, generating, generationError } = useApp();
+  const { agents, authors, strokes, ready, generating, generationError } = useApp();
 
   const [selectedStrokeId, setSelectedStrokeId] = useState<string | null>(null);
   const [previewStrokeId, setPreviewStrokeId] = useState<string | null>(null);
@@ -82,7 +83,7 @@ export default function AgentDetailPage() {
     };
   }, []);
 
-  const agent = useMemo(() => agents.find((a) => a.id === id) ?? null, [agents, id]);
+  const { agent, active: agentActive, loading: profileLoading, error: profileError } = useAgentProfile(id, agents, ready, authors);
   const agentStrokes = useMemo(() => strokes.filter((s) => s.agent_id === id), [strokes, id]);
   const previewStroke = useMemo(() => agentStrokes.find((stroke) => stroke.id === previewStrokeId) ?? null, [agentStrokes, previewStrokeId]);
   const renderAgents = useMemo<Agent[]>(
@@ -214,13 +215,13 @@ export default function AgentDetailPage() {
   // Canvas is MANDATORY and must never be gated on agent/loading/edit state.
   // A missing agent is surfaced inline (info panel + creation lock), not by
   // swapping the canvas out.
-  const notFound = ready && !agent;
+  const notFound = ready && !profileLoading && !profileError && !agent;
 
   // Responsive split: ≤1024px gets a DEDICATED full-screen interaction layout,
   // not the desktop document grid. (null = not yet measured → render nothing to
   // avoid a layout flash / hydration mismatch.)
   if (isMobile === null) return <div className="detail-page" />;
-  if (isMobile) return <AgentDetailMobile id={id} />;
+  if (isMobile) return <AgentDetailMobile id={id} profile={agent} profileLoading={profileLoading} profileError={profileError} active={agentActive} />;
 
   return (
     <div className="detail-page">
@@ -236,7 +237,7 @@ export default function AgentDetailPage() {
         <aside className="detail-col">
           {!agent && (
             <div className="panel detail-summary">
-              <div className="detail-state">{notFound ? `Agent “${id}” not found.` : "loading agent…"}</div>
+              <div className="detail-state">{profileError || (notFound ? `Agent “${id}” not found.` : "loading agent…")}</div>
             </div>
           )}
           {agent && (
@@ -260,6 +261,7 @@ export default function AgentDetailPage() {
                   <div className="dp-name">{agent.name}</div>
                   <div className="dp-occupation">{agent.occupation}</div>
                   <div className="dp-id">{agent.id} · {categoryLabel(agent.category)}</div>
+                  {!agentActive && <div className="dp-id">Outside the live pool · saved author profile</div>}
                 </div>
               </div>
 
@@ -287,7 +289,7 @@ export default function AgentDetailPage() {
               </div>
 
               <div className="dp-section">
-                <button className="btn danger dp-delete" onClick={() => setConfirmDeleteAgent(true)}>
+                <button className="btn danger dp-delete" disabled={!agentActive} onClick={() => setConfirmDeleteAgent(true)}>
                   Remove available agent
                 </button>
               </div>
@@ -411,7 +413,7 @@ export default function AgentDetailPage() {
             <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
               This removes <b>{agent?.name ?? id}</b>{agent ? ` (${agent.occupation})` : ""} from the shared available pool for everyone.
-              All artworks stay on the shared canvas and in the Archive. Anyone can attract this agent again later.
+              All artworks remain saved in the Archive with their original authorship. Automatic recruitment may fill the vacancy at the next server check.
             </p>
             <StorageNotice />
             <div className="modal-actions">
@@ -439,7 +441,7 @@ export default function AgentDetailPage() {
             <h3 className="modal-title">Clear shared canvas for everyone?</h3>
             <p className="modal-body">
               This hides all <b>{strokes.length}</b> stroke{strokes.length === 1 ? "" : "s"} from
-              the shared Snapshot and Sky canvases on every device. All artworks stay in the <Link href="/archive">Archive</Link> and can be restored. This affects all visitors.
+              the shared Snapshot and Sky canvases on every device. All artworks stay in the <Link href="/archive">Archive</Link> and can be restored. This affects all visitors and does not pause scheduled creation.
             </p>
             <StorageNotice />
             <div className="modal-actions">

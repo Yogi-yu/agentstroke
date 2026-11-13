@@ -89,6 +89,21 @@ export function makeAgents(): AgentProfile[] {
   });
 }
 
+/** A fresh model-backed persona; roles are templates, identities never recycle.
+ * Randomness is supplied by the server so this module remains browser-safe. */
+export function makeRecruitedAgent(id: string, roleIndex: number, now: number): AgentProfile {
+  const templates = makeAgents();
+  const template = templates[Math.abs(Math.floor(roleIndex)) % templates.length];
+  return {
+    ...template,
+    id,
+    name: `${template.name} · ${id.slice(-5).toUpperCase()}`,
+    joined_at: now,
+    last_active_at: now,
+    creative_count: 0,
+  };
+}
+
 // ----------------------------------------------------------------------------
 // Category presentation
 // ----------------------------------------------------------------------------

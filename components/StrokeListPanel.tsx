@@ -13,6 +13,7 @@ import Link from "next/link";
 import type { AgentProfile, TransitionPath } from "@/lib/types";
 import { categoryHue } from "@/lib/agents";
 import { orderStrokesForList } from "@/lib/strokeListOrder";
+import { CANVAS_STROKE_LIMIT } from "@/lib/autopilotPolicy";
 
 interface Props {
   strokes: TransitionPath[];
@@ -58,7 +59,7 @@ export default function StrokeListPanel({
       <div className="panel-head">
         <h2>Strokes</h2>
         <div className="sl-head-actions">
-          <span className="muted">{strokes.length} on canvas</span>
+          <span className="muted" title="Oldest arrivals leave the canvas first; every artwork remains in Archive">{strokes.length} / {CANVAS_STROKE_LIMIT} on canvas</span>
           <Link className="sl-archive" href="/archive">Archive ↗</Link>
           <button
             className="sl-clear"
@@ -73,7 +74,7 @@ export default function StrokeListPanel({
       <div className="card-list" ref={listRef}>
         {ordered.length === 0 && (
           <div className="cards-empty">
-            The shared canvas is empty. Restore a saved artwork from the Archive, or open an agent to create a new stroke.
+            The shared canvas is empty. The studio adds a new stroke every five minutes while running. You can also restore a work from Archive or open an agent to create one.
           </div>
         )}
         {ordered.map((s) => {

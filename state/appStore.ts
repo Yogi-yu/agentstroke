@@ -8,19 +8,23 @@
 
 import { useSyncExternalStore } from "react";
 import type { AgentProfile, StrokeTransform, TransitionPath } from "@/lib/types";
+import type { AutopilotStatus } from "@/lib/autopilotPolicy";
 import { canvasRevisionOf, publishCanvasReset, subscribeCanvasReset } from "@/lib/canvasReset";
 
 export interface AppSnapshot {
   agents: AgentProfile[];
+  /** Canonical authors of visible works, independent of live recruitment. */
+  authors: AgentProfile[];
   strokes: TransitionPath[];
   ready: boolean;
   generating: boolean;
   generationError: string;
   /** A failed database operation must remain visible until dismissed or retried. */
   storageError: string;
-  /** A creative task is posted — attracting new agents over time. */
+  /** Legacy read-only field; recruitment is now owned by the server. */
   funding: boolean;
-  /** Total catalog size (ceiling on attractable agents). remaining = capacity - agents. */
+  automation: AutopilotStatus | null;
+  /** Maximum number of agents in the live pool. */
   capacity: number;
   /** Changes on local or remote canvas reset so page-level editing UI can reset. */
   resetRevision: number;
@@ -28,7 +32,7 @@ export interface AppSnapshot {
 }
 
 const EMPTY: AppSnapshot = Object.freeze({
-  agents: [], strokes: [], ready: false, generating: false, generationError: "", storageError: "", funding: false, capacity: 0, resetRevision: 0, clearing: false,
+  agents: [], authors: [], strokes: [], ready: false, generating: false, generationError: "", storageError: "", funding: false, automation: null, capacity: 0, resetRevision: 0, clearing: false,
 });
 
 type Listener = () => void;
@@ -45,12 +49,13 @@ function reconcileRecords<T extends { id: string }>(current: T[], incoming: T[])
 
 class AppStore {
   private agents: AgentProfile[] = [];
+  private authors: AgentProfile[] = [];
   private strokes: TransitionPath[] = [];
   private ready = false;
   private generating = false;
   private generationError = "";
   private storageError = "";
-  private funding = false;
+  private automation: AutopilotStatus | null = null;
   private capacity = 0;
   private canvasRevision: number | null = null;
   private strokeEpoch = 0;
@@ -59,7 +64,6 @@ class AppStore {
   private resetRevision = 0;
   private clearing = false;
   private resetSubscription: (() => void) | null = null;
-  private fundTimer: ReturnType<typeof setTimeout> | null = null;
 
   private listeners = new Set<Listener>();
   private cached: AppSnapshot | null = null;
@@ -78,12 +82,14 @@ class AppStore {
     if (!this.cached) {
       this.cached = {
         agents: this.agents,
+        authors: this.authors,
         strokes: this.strokes,
         ready: this.ready,
         generating: this.generating,
         generationError: this.generationError,
         storageError: this.storageError,
-        funding: this.funding,
+        funding: false,
+        automation: this.automation,
         capacity: this.capacity,
         resetRevision: this.resetRevision,
         clearing: this.clearing,
@@ -131,6 +137,7 @@ class AppStore {
     this.canvasRevision = revision;
     this.invalidateStrokeRequests();
     this.strokes = [];
+    this.authors = [];
     this.resetRevision++;
     this.emit();
   }
@@ -163,8 +170,10 @@ class AppStore {
       if (sequence !== this.readSequence || this.clearing) return;
       this.agents = reconcileRecords(this.agents, ad.agents ?? []);
       this.capacity = ad.capacity ?? this.agents.length;
+      this.automation = ad.automation ?? null;
       if (epoch === this.strokeEpoch && !this.clearing && this.acceptServerRevision(sd.canvasRevision)) {
         this.strokes = reconcileRecords(this.strokes, sd.strokes ?? []);
+        this.authors = reconcileRecords(this.authors, sd.authors ?? []);
       }
     } catch {
       this.storageFailure("Could not load the shared canvas. The last known view has been kept. Please reload to retry.");
@@ -175,40 +184,8 @@ class AppStore {
 
   // ---- agents (server is the source of truth; we mirror its responses) ------
 
-  /**
-   * Post a creative task: arm/disarm the incentive that attracts agents over
-   * time. While active, attract a new agent every 5–15s until the catalog is
-   * exhausted (each attraction is a server POST → we re-sync from its response).
-   */
-  toggleFunding(): void {
-    if (this.funding) this.stopFunding();
-    else this.startFunding();
-  }
-
-  private startFunding(): void {
-    if (this.funding) return;
-    if (this.agents.length >= this.capacity) return; // nothing left to attract
-    this.funding = true;
-    this.emit();
-    this.scheduleAttract();
-  }
-
-  private stopFunding(): void {
-    if (!this.funding && !this.fundTimer) return;
-    this.funding = false;
-    if (this.fundTimer) { clearTimeout(this.fundTimer); this.fundTimer = null; }
-    this.emit();
-  }
-
-  private scheduleAttract(): void {
-    const delay = 5000 + Math.random() * 10000; // 5–15s
-    this.fundTimer = setTimeout(async () => {
-      this.fundTimer = null;
-      await this.attractAgent();
-      if (this.funding && this.agents.length < this.capacity) this.scheduleAttract();
-      else if (this.funding) this.stopFunding(); // exhausted → wind down
-    }, delay);
-  }
+  /** Compatibility no-op: a browser must never start its own recruitment loop. */
+  toggleFunding(): void {}
 
   /** Attract one new agent via the server (POST). Re-syncs the list from the response. */
   async attractAgent(): Promise<boolean> {
@@ -219,6 +196,7 @@ class AppStore {
       this.readSequence++;
       if (Array.isArray(d.agents)) this.agents = d.agents;
       if (typeof d.capacity === "number") this.capacity = d.capacity;
+      if (d.automation) this.automation = d.automation;
       this.emit();
       return !!d.agent;
     } catch {
@@ -247,7 +225,6 @@ class AppStore {
 
   /** Clear the available-agent pool while preserving historical strokes. */
   async clearAgents(): Promise<boolean> {
-    this.stopFunding();
     try {
       const r = await fetch("/api/agents", { method: "DELETE" });
       if (!r.ok) return this.storageFailure("Could not clear your available agents. Your pool has not changed.");
@@ -282,9 +259,11 @@ class AppStore {
       const incoming = ((data.strokes ?? this.strokes) as TransitionPath[]).map(stroke =>
         (this.persistTimers.has(stroke.id) || this.transformWrites.has(stroke.id)) && local.has(stroke.id) ? local.get(stroke.id)! : stroke);
       this.strokes = reconcileRecords(this.strokes, incoming);
+      this.authors = reconcileRecords(this.authors, data.authors ?? []);
       if (agentData) {
         this.agents = reconcileRecords(this.agents, agentData.agents ?? []);
         this.capacity = agentData.capacity ?? this.agents.length;
+        this.automation = agentData.automation ?? null;
       }
       this.ready = true;
       this.emit();
@@ -317,9 +296,9 @@ class AppStore {
       const d = await r.json();
       if (epoch !== this.strokeEpoch || !this.acceptServerRevision(d.canvasRevision)) return;
       if (r.ok && d.stroke) {
-        this.readSequence++;
-        this.strokes = [...this.strokes.filter(stroke => stroke.id !== d.stroke.id), d.stroke as TransitionPath];
-        this.emit();
+        // The same commit may evict the oldest canvas arrival. Do not append
+        // locally and briefly display 51 works or guess which work was evicted.
+        await this.refresh(true);
       } else {
         this.generationError = typeof d.error === "string" ? d.error : "The agent could not create a stroke. Please try again.";
       }
@@ -420,9 +399,8 @@ class AppStore {
       const data = await response.json();
       if (!response.ok || !data.stroke) return this.storageFailure("Could not restore this artwork. Please try again.");
       if (epoch !== this.strokeEpoch || !this.acceptServerRevision(data.canvasRevision)) return false;
-      this.readSequence++;
-      this.strokes = [...this.strokes.filter((s) => s.id !== data.stroke.id), data.stroke];
-      this.emit();
+      // Restoring a work changes its canvas-arrival position; trust server FIFO.
+      await this.refresh(true);
       return true;
     } catch {
       return this.storageFailure("Could not confirm restoration. Check the canvas before trying again.");

@@ -39,7 +39,11 @@ economy, not abstract thinkers.
 `AgentProfile { id, name, category, economic_function, real_world_mapping,
 task_domain, revenue_impact, model, model_type }`.
 
-23 agents across six categories, each colour-coded on the canvas:
+The catalog supplies 23 role templates across six categories. The running studio
+recruits distinct model-backed agent identities from those templates, maintaining
+30–50 available agents (target 40), rather than treating the catalog as a fixed
+23-agent ceiling. These are model-backed personas within Noema, not a claim that
+external agents have independently joined the website.
 
 | Category | Function | Agents |
 | --- | --- | --- |
@@ -141,7 +145,12 @@ canvas. The shared canvas is not reseeded on refresh, process restart, or
 deployment. Each new Sky asks for ten independent agent-authored strokes
 (twenty in Sphere Sky), displaying and saving completed results one by one.
 
-There is **no artwork TTL, scheduled clearing, or maximum-history eviction**.
+There is **no artwork TTL or maximum-history eviction**. The shared exhibition
+shows at most **50 strokes**. When a new stroke is added, the earliest-added
+visible stroke leaves the canvas first (FIFO), while its complete original stays
+in the Archive. This also applies to manual generation, Sky batches and restored
+works. Restoring an archived work gives it a new position in the exhibition;
+retrying an already-visible save does not move it to the front of the queue.
 “Remove from canvas” and “Clear canvas” change the shared visible membership
 for everyone (including the active Sky view). They do not delete artwork records.
 Use `/archive` to browse saved originals and restore them. Removing an agent
@@ -159,9 +168,11 @@ back on the canvas. An unexpired legacy generation lease blocks this migration
 until the old worker finishes, rather than losing later results.
 
 Studio polls visible shared state every three seconds and refreshes on focus.
-Sky loads the latest public batch, even in a new tab or on a different device;
-viewing never triggers a paid generation. Generate/retry still requires an explicit
-action, and only one shared Sky batch can run at a time. All visitors can edit,
+Sky loads the latest public batch, even in a new tab or on a different device.
+Manual Generate/retry still requires an explicit action, and only one shared Sky
+batch can run at a time. Separately, the server's autonomous studio follows the
+schedule below; opening more browser tabs does not create more schedules.
+All visitors can edit,
 hide, clear, restore, and change the shared agent pool; confirmation dialogs state
 the global impact. Same-origin checks still protect mutation APIs. This is an
 open collaborative exhibition, not a private multi-tenant workspace. Keep database
@@ -174,6 +185,33 @@ settings, never in Git. Existing artwork is viewable without it; model-backed
 generation and chat require the configured provider. The snapshot does not
 replace another application's tables. Use a dedicated logical database for
 Noema when sharing an existing PostgreSQL instance.
+
+### Autonomous studio (while the service is running)
+
+- Every **30 seconds**, the server checks roster maintenance and the next due
+  creation. Available agent count is maintained between **30 and 50**, targeting
+  **40**. Each scheduled creator is a newly recruited identity.
+- Agents leave the available pool after **10 minutes without activity**. Actual
+  creation and conversation update server-recorded activity; reading a profile,
+  polling the canvas or watching an animation does not count as activity.
+  Retired identity records and their artwork provenance remain stored.
+- Every **5 minutes**, a newly recruited agent authors one stroke through the
+  existing OpenRouter pipeline. Model failures remain visible failures, never
+  substitute artwork. The schedule does not rapidly retry a failed creation.
+- A database-backed lease serializes scheduled work across server instances and
+  rolling deploys. In-flight work is bounded and cancellation-aware. A late result
+  after a canvas clear stays archived and cannot undo the clear.
+- This setup adds **no paid cron or worker service**. It runs only while the
+  existing web service is awake. Free-hosting sleep pauses it; startup/resume
+  waits for the next five-minute interval and does **not** catch up missed work.
+  Provider calls consume the configured API account's quota while running.
+- Clearing agents or strokes changes the current shared view, not this schedule:
+  agents are recruited again during maintenance, and future scheduled strokes
+  gradually refill a cleared canvas. No old hidden work is silently restored.
+
+The Studio panel displays scheduling state, the next creation and safe provider
+errors. The model's chosen words, route and artistic attributes still determine
+each work; the scheduler only chooses when to recruit and request a new creation.
 
 ## UI
 
@@ -212,7 +250,8 @@ UIState { cinematic_mode: boolean; selected_agent: string | null; selected_strok
 
 | Method | Route                  | Description                                        |
 | ------ | ---------------------- | -------------------------------------------------- |
-| GET    | `/api/agents`          | Agent identity roster                              |
+| GET    | `/api/agents`          | Available roster and autonomous studio status       |
+| GET    | `/api/agents/[id]`     | Active or retained historical agent identity        |
 | POST   | `/api/generateStroke`  | `{ agent_id?, mode?: "autonomous", canvasRevision? }` → `{ stroke }` |
 | GET    | `/api/strokes`         | Shared visible strokes, no login required         |
 | DELETE | `/api/strokes`         | Hide visible strokes; retain every archived original |

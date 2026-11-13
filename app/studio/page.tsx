@@ -19,6 +19,7 @@ import CanvasPlaybackControls from "@/components/CanvasPlaybackControls";
 import StorageNotice from "@/components/StorageNotice";
 import type { Agent, EditModeState, StrokeTransform, UIState } from "@/lib/types";
 import { agentRenderStyle } from "@/lib/agents";
+import { canvasAuthors } from "@/lib/canvasAuthors";
 import { IDENTITY_TRANSFORM } from "@/store/transformStore";
 import { appStore, useApp } from "@/state/appStore";
 import { readCanvasDisplayMode, type CanvasDisplayMode } from "@/engine/canvasPresentation";
@@ -28,7 +29,7 @@ import { DEFAULT_MOTION_SPEED, DEFAULT_SPHERE_CONTROLS, clampMotionSpeed, type S
 const ROTATE_STEP = Math.PI / 24; // 7.5° per keyboard rotate press
 
 export default function Home() {
-  const { agents, strokes, ready, resetRevision } = useApp();
+  const { agents, authors, strokes, ready, resetRevision } = useApp();
 
   // ---- global UI state (Feature 5) ----
   const [ui, setUI] = useState<UIState>({
@@ -125,10 +126,11 @@ export default function Home() {
   }, []);
 
 
-  // ---- render adapters: colour is DERIVED from id (emergent), not authored ----
+  // Canonical authors remain available after leaving the live recruitment pool.
+  const knownAuthors = useMemo(() => canvasAuthors(agents, authors), [agents, authors]);
   const renderAgents = useMemo<Agent[]>(
-    () => agents.map((a) => ({ id: a.id, style: agentRenderStyle(a.category) })),
-    [agents],
+    () => knownAuthors.map((a) => ({ id: a.id, style: agentRenderStyle(a.category) })),
+    [knownAuthors],
   );
 
   // ---- hide from this canvas; artworks remain in the archive ----
@@ -297,7 +299,7 @@ export default function Home() {
     () => strokes.find((s) => s.id === ui.selected_stroke) ?? null,
     [strokes, ui.selected_stroke],
   );
-  const selAgent = agents.find((a) => a.id === selectedStroke?.agent_id);
+  const selAgent = knownAuthors.find((a) => a.id === selectedStroke?.agent_id);
   const selHue = selAgent ? agentRenderStyle(selAgent.category).hue : 210;
   // Inspector readout: prefer the live local edit, else the stroke's PERSISTED
   // transform (so it's correct immediately after a refresh), else identity.
@@ -403,7 +405,7 @@ export default function Home() {
                   ? "sphere view · drag to rotate · click a visible stroke to inspect · edit on the flat canvas"
                 : ui.selected_stroke
                   ? "stroke focus — click Edit Mode to transform it"
-                  : "post a creative task to attract agents · open an agent to create strokes · click a stroke to inspect"}
+                  : "autonomous studio · one new stroke every 5 minutes while running · 50-stroke rotating canvas · click a stroke to inspect"}
           </div>
         )}
 
@@ -440,7 +442,7 @@ export default function Home() {
           )}
           <StrokeListPanel
             strokes={strokes}
-            agents={agents}
+            agents={knownAuthors}
             selectedStrokeId={ui.selected_stroke}
             locked={edit.active}
             onSelect={setSelectedStroke}
@@ -487,7 +489,7 @@ export default function Home() {
             <p className="modal-body">
               This hides the visible strokes in <b>Agent Snapshot and Sky for everyone</b> and stops the current Sky batch.
               Every artwork stays saved in the <Link href="/archive">Archive</Link>, where you can restore it.
-              The shared agent pool is not changed. This does not delete any artwork.
+              The shared agent pool is not changed. This does not delete any artwork or pause automatic creation; new strokes will appear on the normal schedule.
             </p>
             {clearError && <p className="modal-body" role="alert">{clearError}</p>}
             <div className="modal-actions">

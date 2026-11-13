@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 import { hasOpenRouterKey } from "@/lib/openrouter/client";
 import { createSkyBatch, retrySkyBatch, runSkyBatch, selectSkyAgents, skyBatchSize, type SkyBatch, type SkyMode } from "@/lib/skyBatch";
-import { canvasRevision, listAgents, listStrokes } from "@/lib/store";
+import { canvasRevision, listAgents, listStrokes, touchAgentActivity } from "@/lib/store";
 import { generateStroke } from "@/lib/strokegen";
 import { readSkyBatch, readSkySnapshot, claimSkyBatch, saveSkyBatch, heartbeatSkyBatch, abandonSkyBatch } from "@/lib/skyBatchStore";
 import { withVisitor } from "@/lib/visitor";
@@ -116,6 +116,7 @@ export async function POST(request: Request) {
         void runSkyBatch(job, {
           signal: generation.signal,
           generate: async (agent, index, onAttempt) => {
+            await touchAgentActivity(owner,agent.id);
             const previous = job.entries.slice(0, index).findLast(entry => entry.status === "succeeded")?.stroke ?? existing.at(-1);
             // Clearing/losing a lease stops the NEXT slot, not an already paid
             // request. Its bounded in-flight result still belongs in Archive.

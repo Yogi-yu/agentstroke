@@ -129,7 +129,7 @@ test('ordinary saves allocate once; duplicate requests and removals do not rerol
   assert.equal((await store.addStroke(owner,makeStroke(100))).brush_treatment, brushTreatmentForIndex(20));
 });
 
-test('concurrent Sky saves do not consume ordinary allocation slots and no stroke is evicted after 500', async t => {
+test('Sky saves do not consume ordinary allocation slots and FIFO hides rather than deletes artworks after 500', async t => {
   const store = durableStore(t);
   await store.clearStrokes(owner);
   const ordinary = [];
@@ -137,6 +137,7 @@ test('concurrent Sky saves do not consume ordinary allocation slots and no strok
     if (i % 3 === 0) await store.addStroke(owner,assignBrushTreatment(makeStroke(1000 + i), 'calligraphy'));
     ordinary.push((await store.addStroke(owner,makeStroke(i))).brush_treatment);
   }
-  assert.equal((await store.listStrokes(owner)).length, 680);
+  assert.equal((await store.listStrokes(owner)).length, 50);
+  assert.equal((await store.listArchivedStrokes(owner)).total, 681,'all 680 new works and the public example remain archived');
   for (let i = 0; i < ordinary.length; i++) assert.equal(ordinary[i], brushTreatmentForIndex(i));
 });

@@ -10,7 +10,7 @@
 // ============================================================================
 
 import { NextResponse } from "next/server";
-import { getAgent, strokesForAgent } from "@/lib/store";
+import { getAgent, strokesForAgent, touchAgentActivity } from "@/lib/store";
 import { getOpenRouter } from "@/lib/openrouter/client";
 import { modelSpec } from "@/lib/openrouter/models";
 import {
@@ -53,6 +53,7 @@ export async function POST(req: Request) {
 
   const agent = await getAgent(owner, agent_id);
   if (!agent) return NextResponse.json({ error: `unknown agent: ${agent_id}` }, { status: 404 });
+  await touchAgentActivity(owner,agent_id);
 
   const history = Array.isArray(body.history)
     ? (body.history as unknown[])

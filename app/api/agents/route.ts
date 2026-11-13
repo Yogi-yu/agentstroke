@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { listAgents, agentCapacity, attractAgent, clearAgents } from "@/lib/store";
 import { withVisitor } from "@/lib/visitor";
+import { readAutopilotStatus } from "@/lib/autopilotStore";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
-  return withVisitor(request, async owner => NextResponse.json({ agents: await listAgents(owner), capacity: agentCapacity() }, { headers: { "Cache-Control": "no-store" } }));
+  return withVisitor(request, async owner => NextResponse.json({ agents: await listAgents(owner), capacity: agentCapacity(), automation: await readAutopilotStatus() }, { headers: { "Cache-Control": "no-store" } }));
 }
 export async function POST(request: Request) {
   return withVisitor(request, async owner => {

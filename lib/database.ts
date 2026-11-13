@@ -19,11 +19,15 @@ const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS noema_artworks (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, payload TEXT NOT NULL, agent_json TEXT, created_at BIGINT NOT NULL, source TEXT NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS noema_artworks_owner_created ON noema_artworks(owner_id, created_at, id)`,
   `CREATE TABLE IF NOT EXISTS noema_canvas (owner_id TEXT NOT NULL REFERENCES noema_visitors(owner_id), artwork_id TEXT NOT NULL REFERENCES noema_artworks(id), hidden INTEGER NOT NULL DEFAULT 0, transform_json TEXT, added_at BIGINT NOT NULL, PRIMARY KEY(owner_id, artwork_id))`,
+  `CREATE INDEX IF NOT EXISTS noema_canvas_visible_admission ON noema_canvas(owner_id,hidden,added_at)`,
+  `CREATE INDEX IF NOT EXISTS noema_canvas_admission ON noema_canvas(owner_id,added_at)`,
   `CREATE TABLE IF NOT EXISTS noema_sky_jobs (owner_id TEXT NOT NULL REFERENCES noema_visitors(owner_id), request_id TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, revision INTEGER NOT NULL, lease_id TEXT, lease_until BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY(owner_id, request_id))`,
   `CREATE INDEX IF NOT EXISTS noema_sky_owner_status ON noema_sky_jobs(owner_id, status, lease_until)`,
   `CREATE TABLE IF NOT EXISTS noema_legacy_snapshots (id TEXT PRIMARY KEY, source TEXT NOT NULL, content_sha256 TEXT NOT NULL, payload TEXT NOT NULL, created_at BIGINT NOT NULL, UNIQUE(source,content_sha256))`,
   `CREATE TABLE IF NOT EXISTS noema_artwork_colors (artwork_id TEXT PRIMARY KEY REFERENCES noema_artworks(id), treatment TEXT NOT NULL CHECK(treatment IN ('bright','muted')), assigned_at BIGINT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS noema_color_state (id TEXT PRIMARY KEY, initialized INTEGER NOT NULL DEFAULT 0, next_sequence BIGINT NOT NULL DEFAULT 0)`,
+  `CREATE TABLE IF NOT EXISTS noema_agent_history (owner_id TEXT NOT NULL, agent_id TEXT NOT NULL, profile_json TEXT NOT NULL, retired_at BIGINT, updated_at BIGINT NOT NULL, PRIMARY KEY(owner_id,agent_id))`,
+  `CREATE TABLE IF NOT EXISTS noema_autopilot (owner_id TEXT PRIMARY KEY REFERENCES noema_visitors(owner_id), payload TEXT NOT NULL)`,
 ];
 
 async function openDatabase(): Promise<DatabaseHandle> {

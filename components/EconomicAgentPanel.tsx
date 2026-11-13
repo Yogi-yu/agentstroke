@@ -4,17 +4,14 @@
 // EconomicAgentPanel — the SINGLE unified agent system (right panel).
 // ----------------------------------------------------------------------------
 // Derives ENTIRELY from the server-authoritative agent pool (appStore mirrors
-// GET /api/agents). "Post Creative Task" attracts more agents over time (server
-// POST); each card can delete its agent (server DELETE) behind a confirmation.
-// Per-agent creative activity (stroke counts / idle) is computed from the live
-// stroke list. View-only for navigation: a card opens its detail page (the sole
-// creation entry point).
+// GET /api/agents). Recruitment and timed creation belong to the server, never
+// a browser timer. Durable activity survives an artwork leaving the live canvas.
 // ============================================================================
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import type { AgentProfile } from "@/lib/types";
-import { DEFAULT_REWARD_SYSTEM } from "@/lib/types";
+import { AGENT_IDLE_TIMEOUT_MS, AGENT_POOL_MAX, AGENT_POOL_MIN, AUTO_STROKE_INTERVAL_MS, CANVAS_STROKE_LIMIT } from "@/lib/autopilotPolicy";
 import { categoryHue, categoryLabel } from "@/lib/agents";
 import { orderAgentsForSelection } from "@/lib/agentListOrder";
 import { appStore, useApp } from "@/state/appStore";
@@ -30,7 +27,6 @@ interface Props {
 }
 
 const JOINING_MS = 2500; // window during which a freshly-attracted agent flags itself
-const reward = DEFAULT_REWARD_SYSTEM;
 
 function fmtIdle(ms: number): string {
   if (ms < 1000) return "0s";
@@ -42,14 +38,14 @@ function fmtIdle(ms: number): string {
 }
 
 export default function EconomicAgentPanel({ disabled, highlightedAgentId, selectedStrokeId }: Props) {
-  const { agents, strokes, funding, capacity } = useApp();
+  const { agents, strokes, automation } = useApp();
   const [now, setNow] = useState(() => Date.now());
   const [confirmDelete, setConfirmDelete] = useState<AgentProfile | null>(null);
   const [confirmClearAgents, setConfirmClearAgents] = useState(false);
   const [changingAgents, setChangingAgents] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // 1s heartbeat so idle times + the "attracted" window stay live.
+  // Display-only clock: it never records activity or triggers recruitment.
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
@@ -62,7 +58,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
     if (listRef.current) listRef.current.scrollTop = 0;
   }, [highlightedAgentId, selectedStrokeId]);
 
-  // Per-agent creative activity derived from the live stroke list.
+  // Prefer durable lifetime activity; old responses can fall back to the view.
   const activityById = useMemo(() => {
     const m = new Map<string, { count: number; last: number }>();
     for (const s of strokes) {
@@ -71,11 +67,29 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
       e.last = Math.max(e.last, s.created_at);
       m.set(s.agent_id, e);
     }
+    for (const a of agents) {
+      const visible = m.get(a.id);
+      m.set(a.id, {
+        count: a.creative_count ?? visible?.count ?? 0,
+        last: a.last_active_at ?? visible?.last ?? a.joined_at ?? 0,
+      });
+    }
     return m;
-  }, [strokes]);
+  }, [strokes, agents]);
 
-  const remaining = Math.max(0, capacity - agents.length);
-  const taskDisabled = disabled || (remaining === 0 && !funding);
+  const minAgents = automation?.minAgents ?? AGENT_POOL_MIN;
+  const maxAgents = automation?.maxAgents ?? AGENT_POOL_MAX;
+  const idleTimeoutMs = automation?.idleTimeoutMs ?? AGENT_IDLE_TIMEOUT_MS;
+  const intervalMinutes = (automation?.generationIntervalMs ?? AUTO_STROKE_INTERVAL_MS) / 60_000;
+  const nextIn = automation?.nextGenerationAt ? Math.max(0, automation.nextGenerationAt - now) : null;
+  const automationLabel = !automation ? "Connecting to studio…"
+    : !automation.enabled ? "Automatic creation is disabled"
+    : automation.generating ? "A new agent is drawing…"
+    : !automation.running ? "Waiting for the studio to resume"
+    : nextIn === null ? "Preparing the next creation"
+    : nextIn > 0 ? `Next creation in ${fmtIdle(nextIn)}`
+    : "Waiting for the next server tick";
+  const retiredAuthorSelected = highlightedAgentId && !agents.some(a => a.id === highlightedAgentId);
 
   // The selected stroke's author leads; other agents keep their activity order.
   const ordered = useMemo(
@@ -99,35 +113,26 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
         </div>
       </div>
 
-      {/* Task bounty — posts a creative task that attracts more economic agents. */}
+      {/* Read-only server status. Multiple viewers cannot create extra jobs. */}
       <div className="econ-task">
-        <button
-          className={`task-btn${funding ? " active" : ""}`}
-          disabled={taskDisabled}
-          onClick={() => appStore.toggleFunding()}
-          title="Post a creative task that attracts more economic agents"
-        >
-          {funding ? "Pause Task" : "Post Creative Task"}
-        </button>
-
         <div className="econ-reward">
-          <span className="econ-reward-main">${reward.per_creation_reward.toFixed(2)} per creation</span>
-          {reward.revenue_share_enabled && (
-            <span className="econ-reward-sub">Includes future revenue share</span>
-          )}
+          <span className="econ-reward-main">Autonomous studio</span>
+          <span className="econ-reward-sub">{minAgents}–{maxAgents} live agents · automatic recruitment</span>
         </div>
-
-        {funding && (
-          <div className="econ-task-status">
-            <span className="econ-pulse" />
-            task posted · attracting economic agents…
-          </div>
-        )}
+        <div className="econ-task-status">
+          {automation?.running && <span className="econ-pulse" />}
+          {automationLabel}
+        </div>
         <div className="econ-task-sub">
-          {remaining > 0
-            ? `${remaining} economic agents available to attract`
-            : "all economic agents attracted"}
+          A fresh agent creates one stroke every {intervalMinutes} minutes.
+          Agents leave after {idleTimeoutMs / 60_000} minutes without creative or chat activity.
         </div>
+        <div className="econ-task-sub">
+          The canvas keeps {automation?.canvasLimit ?? CANVAS_STROKE_LIMIT} strokes. Oldest arrivals move to Archive as new work arrives.
+          Automatic creation pauses while the service sleeps.
+        </div>
+        {automation?.lastError && <p className="econ-task-sub" role="alert">{automation.lastError}</p>}
+        {retiredAuthorSelected && <Link className="econ-task-sub" href={`/agent/${highlightedAgentId}`}>Selected author is outside the live pool · View profile ↗</Link>}
       </div>
 
       <div ref={listRef} className={`econ-list${disabled ? " locked" : ""}`}>
@@ -137,7 +142,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
           const highlighted = a.id === highlightedAgentId;
           const act = activityById.get(a.id);
           const strokeCount = act?.count ?? 0;
-          const lastActive = act?.last ?? a.joined_at ?? now;
+          const lastActive = a.last_active_at ?? act?.last ?? a.joined_at ?? now;
           const idle = Math.max(0, now - lastActive);
           const cls =
             `econ-card${joining ? " joining" : ""}${highlighted ? " highlighted" : ""}` +
@@ -171,12 +176,12 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
 
               {/* FOOTER: idle time · activity status */}
               <div className="econ-footer">
-                <span className="econ-idle" title="time since this agent last created">
+                <span className="econ-idle" title="Time since the agent last created, chatted, or joined; page views do not count">
                   idle {fmtIdle(idle)}
                 </span>
                 <span className="econ-status-group">
-                  <span className={`econ-status${strokeCount > 0 ? " active" : ""}`}>
-                    {strokeCount > 0 ? "● active" : "○ idle"}
+                  <span className={`econ-status${idle < idleTimeoutMs ? " active" : ""}`}>
+                    {idle >= idleTimeoutMs ? "○ retiring" : "● available"}
                   </span>
                   {!disabled && (
                     <button
@@ -191,7 +196,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
                 </span>
               </div>
 
-              {joining && <div className="econ-joining">attracted to task…</div>}
+              {joining && <div className="econ-joining">joining the studio…</div>}
             </>
           );
           // VIEW-ONLY: the whole card navigates to the detail page (the sole
@@ -227,8 +232,8 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
             <h3 className="modal-title">Remove available agent?</h3>
             <p className="modal-body">
               This removes <b>{confirmDelete.name}</b> ({confirmDelete.occupation}) from the shared agent pool for everyone.
-              All of its strokes stay on the shared canvas and in the Archive with their original authorship.
-              You can attract this agent again later.
+              Its artworks and authorship remain saved in the Archive. Canvas works continue their normal rotation.
+              Automatic recruitment may fill the vacancy at the next server check.
             </p>
             <StorageNotice />
             <div className="modal-actions">
@@ -254,7 +259,7 @@ export default function EconomicAgentPanel({ disabled, highlightedAgentId, selec
           <div className="modal" role="dialog" aria-modal="true" aria-labelledby="clear-agents-title" onClick={(e) => e.stopPropagation()}>
             <h3 id="clear-agents-title" className="modal-title">Clear all agents?</h3>
             <p className="modal-body">
-              This removes all <b>{agents.length}</b> agents from the shared pool for everyone. All artworks stay on the shared canvas and in the Archive with their original provenance. Agents can be attracted again later.
+              This removes all <b>{agents.length}</b> agents from the shared pool for everyone. All artworks remain saved with their original provenance. Automatic recruitment will refill the live pool at the next server check; this does not pause the studio.
             </p>
             <StorageNotice />
             <div className="modal-actions">
