@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { createTypeScriptLoader } = require("./load-typescript.cjs");
 
 const load = createTypeScriptLoader();
-const { colorTreatmentForIndex, resolveColorTreatment, pigmentHsl } = load("engine/colorTreatment.ts");
+const { colorTreatmentForIndex, resolveColorTreatment, pigmentHsl, createNaturalPigment, sampleNaturalPigment } = load("engine/colorTreatment.ts");
 const { hashStr } = load("simulation/rng.ts");
 const { resolveVisualSignature, buildVisualPath, sampleWidthProfile } = load("engine/visualSignature.ts");
 const { getStrokePlayback, strokeDistanceAtTime } = load("engine/strokePlayback.ts");
@@ -50,6 +50,15 @@ function hsl(value) {
   const match = /^hsl\(([-\d.]+)\s+([\d.]+)%\s+([\d.]+)%(?:\s*\/\s*([\d.]+))?\)$/.exec(value);
   assert.ok(match, `expected an HSL pigment, received ${value}`);
   return { hue: Number(match[1]), saturation: Number(match[2]), lightness: Number(match[3]), alpha: match[4] === undefined ? undefined : Number(match[4]) };
+}
+
+function paint(value) {
+  if (value.startsWith("hsl(")) return { format: "hsl", ...hsl(value) };
+  const match = /^rgb\(([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+))?\)$/.exec(value);
+  assert.ok(match, `expected opaque RGB pigment or an existing HSL color, received ${value}`);
+  const rgb = match.slice(1, 4).map(Number);
+  assert.ok(rgb.every(channel => Number.isFinite(channel) && channel >= 0 && channel <= 255));
+  return { format: "rgb", rgb, alpha: match[4] === undefined ? undefined : Number(match[4]) };
 }
 
 test("independent allocation gives exactly half muted in every ten/twenty consecutive slots", () => {
@@ -103,21 +112,15 @@ test("changing only pigment treatment preserves every non-tone signature field, 
   }
 });
 
-test("muted pigment reduces saturation and brightness rather than introducing alpha, while preserving hue", () => {
+test("the bright palette retains its original hue, saturation and lightness exactly", () => {
   for (const hue of [0, 37.2, 118, 210, 299.9, 359.9]) {
     for (const saturation of [52, 61, 68, 82, 88]) {
       for (const lightness of [2, 5, 21, 23, 30, 32, 37, 47, 59, 67, 76, 86, 88, 100]) {
-        const bright = hsl(pigmentHsl(hue, saturation, lightness, "bright"));
-        const muted = hsl(pigmentHsl(hue, saturation, lightness, "muted"));
-        assert.equal(bright.hue, muted.hue);
+        const bright = hsl(pigmentHsl(hue, saturation, lightness));
+        assert.equal(bright.hue, hue);
         assert.equal(bright.saturation, saturation);
         assert.equal(bright.lightness, lightness);
-        assert.ok(muted.saturation <= 20 && muted.saturation >= 11, "retain restrained warm/cool tint, not neon saturation");
-        assert.ok(muted.lightness < bright.lightness && muted.lightness <= 49, "highlights must also be subdued");
-        if (lightness >= 47) assert.ok(muted.lightness >= 26, "painted faces remain readable against black");
         assert.equal(bright.alpha, undefined);
-        assert.equal(muted.alpha, undefined, "dark pigment is not an opacity effect");
-        assert.equal(pigmentHsl(hue, saturation, lightness), pigmentHsl(hue, saturation, lightness, "bright"));
       }
     }
   }
@@ -159,9 +162,9 @@ function geometryOnly(frame) {
   return frame.map(({ color, ...operation }) => ({
     ...operation,
     // Gradient positions and alpha encode material/time, not tone.
-    pigmentGeometry: typeof color === "string" ? { alpha: hsl(color).alpha } : {
+    pigmentGeometry: typeof color === "string" ? { alpha: paint(color).alpha } : {
       args: color.args,
-      stops: color.stops.map(([position, value]) => [position, hsl(value).alpha]),
+      stops: color.stops.map(([position, value]) => [position, paint(value).alpha]),
     },
   }));
 }
@@ -202,18 +205,20 @@ test("all five materials keep identical point/short/long drawing commands, alpha
       }
       assert.deepEqual(muted.draw(progress, retainTrace, 999999), b, "replay and wall-clock changes cannot reroll tone");
     }
-    // Inspect each actual palette layer the renderer cached, including layers
-    // some materials intentionally do not draw, to prevent a neon-rim escape.
+    // Every muted layer must come from the native pigment recipe, not a filter
+    // applied to the bright material's HSL values (including invisible layers).
     const a = bright.renderer.cache.get(original.id), b = muted.renderer.cache.get(original.id);
     assert.ok(a && b);
     assert.equal(a.samples.length, b.samples.length);
+    const profile = createNaturalPigment(toned.id, b.signature.color_count);
     for (let i = 0; i < a.samples.length; i++) {
       const source = a.samples[i], target = b.samples[i];
+      const expected = sampleNaturalPigment(profile, i / Math.max(1, b.samples.length - 1), target.texture, material.style);
       for (const key of PIGMENTS) {
-        const one = hsl(source[key]), two = hsl(target[key]);
-        assert.equal(one.hue, two.hue, `${key} keeps the original hue progression`);
-        assert.ok(two.saturation <= 20 && two.saturation < one.saturation, `${key} is grey-tinted`);
-        assert.ok(two.lightness <= 49 && two.lightness < one.lightness, `${key} is actually darker`);
+        const one = paint(source[key]), two = paint(target[key]);
+        assert.equal(one.format, "hsl", "bright pigments keep the old recipe");
+        assert.equal(two.format, "rgb", "muted pigments are authored RGB materials, not desaturated original hues");
+        assert.equal(target[key], expected[key], `${key} uses the natural pigment family`);
         assert.equal(two.alpha, one.alpha);
       }
       const strip = sample => Object.fromEntries(Object.entries(sample).filter(([key]) => !PIGMENTS.includes(key)));

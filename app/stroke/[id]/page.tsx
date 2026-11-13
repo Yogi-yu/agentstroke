@@ -23,6 +23,7 @@ import { agentRenderStyle, categoryLabel } from "@/lib/agents";
 import { agentAuthoredDistance, motionStabilityFromDurations, pathLength, resolveVisualSignature, WIDTH_STABILITY_CONSTANT_THRESHOLD, WIDTH_STABILITY_FREQUENT_THRESHOLD } from "@/engine/visualSignature";
 import { buildMotionPath } from "@/engine/motionPattern";
 import { getStrokePlayback } from "@/engine/strokePlayback";
+import { createNaturalPigment } from "@/engine/colorTreatment";
 import { hashStr } from "@/simulation/rng";
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
@@ -177,11 +178,11 @@ const ATTR_DOCS: Record<string, AttrDoc> = {
     highLow: "Materials differ in contour, pressure response, pigment and groove structure—not simply opacity. A genuine zero-length gesture remains a compact point.",
   },
   color_system: {
-    definition: "A seeded random palette with a persistent bright or muted pigment treatment, distributed evenly over travelled length.",
+    definition: "A persistent bright or natural dark pigment palette, with color anchored to travelled distance.",
     geometry: "Color changes pigment only; it never splits or duplicates the one-stroke centerline.",
-    motion: "The gradient remains attached to travelled distance as the meteor reveals the route.",
+    motion: "The gradient remains attached to travelled distance as the meteor reveals the route. Natural pigments also have gentle, continuous variations in deposited color along the stroke, rather than a uniform darkening filter.",
     ranges: "Long stroke + motion <0.35 = 1 color; 0.35–<0.70 = 3; ≥0.70 = 5. Non-long strokes are locked to 1.",
-    highLow: "Half of the platform's strokes receive muted, low-saturation charcoal and slate tones. The others retain their bright pigments. Tone is saved per artwork, independent of motion and material; it never rerolls on replay or filtering.",
+    highLow: "Half of the platform's strokes use native dark pigment families, each with its own cool or warm character and artwork-seeded density. They are not the original bright colors made darker. The other half retain their bright pigments. The saved allocation and seeded pigment variation remain stable across replay and filtering.",
   },
   draw_speed: {
     definition: "The meteor's travel rhythm, derived from the dwell times recorded along its semantic path.",
@@ -323,6 +324,12 @@ export default function StrokeDetailPage() {
   const attributeState = useMemo<Record<string, string>>(() => {
     if (!signature) return {} as Record<string, string>;
     const hueList = signature.color_hues.map((hue) => `${Math.round(hue)}°`).join(" → ");
+    const naturalPigment = signature.color_treatment === "muted" && stroke
+      ? createNaturalPigment(stroke.id, signature.color_count)
+      : null;
+    const colorState = naturalPigment
+      ? `Natural pigment: ${naturalPigment.families.map((pigment) => pigment.name).join(" → ")}. ${signature.color_count} native pigment stop${signature.color_count === 1 ? " is" : "s are"} used, with artwork-seeded density ${naturalPigment.density.toFixed(2)}. Each work starts with its own dark pigment recipe, not a darkened version of the bright palette. Pigment deposition varies gently along the stroke while preserving its material texture. The same position always reproduces the same color on replay.`
+      : `Bright pigment: this work retains its original saturated material palette. ${signature.color_count} seeded-random pigment${signature.color_count === 1 ? " is" : "s are"} used (${hueList}). Stops are equally spaced and interpolated by travelled distance.`;
     const speedRange = `${Math.min(...signature.speed_profile).toFixed(2)}–${Math.max(...signature.speed_profile).toFixed(2)}`;
     const pattern = motion?.pattern ?? "glide";
     const family = MOTION_LABELS[pattern];
@@ -348,7 +355,7 @@ export default function StrokeDetailPage() {
       width_variation: `${signature.width_change_count === 0 ? "This stroke holds pressure at 1× because its stability is below 0.02; its material still shapes the outline." : `This stroke has ${signature.width_change_count} pronounced press/lift transitions: ${signature.width_profile.map((value) => `${value.toFixed(2)}×`).join(" → ")}. Its pressure peak-to-valley contrast is ${(Math.max(...signature.width_profile) / Math.min(...signature.width_profile)).toFixed(1)}:1, smoothly interpolated without mean normalization.`} The centerline is unchanged; physical width stays inside the material's 12-pixel cap.`,
       crossings: `Actual centerline crossings: ${actualCrossings}. Maximum permitted: ${crossingBudget}, derived from entropy ${m.entropy.toFixed(2)} and ${signature.length_class} length. ${family} uses only the intersections natural to its complete route; unused budget does not add loops. Counted before bounded corner rounding.`,
       brush_head: `${signature.brush_style}: ${MATERIAL_EFFECTS[signature.brush_style]} ${signature.brush_style === "calligraphy" ? "The platform assigned this work to the 40% calligraphy mix; its original agent-authored attributes and route remain unchanged." : "This work retains its intensity-selected original material."} The original ${signature.brush_heads.join(" + ")} primitive-head metadata remains inspectable without stamping detached shapes onto the route.`,
-      color_system: `${signature.color_treatment === "muted" ? "Muted pigment: body, highlights and edges use low-saturation grey tones with restrained cool/warm tint." : "Bright pigment: this work retains its original saturated material palette."} ${signature.color_count} seeded-random pigment${signature.color_count === 1 ? " is" : "s are"} used (${hueList}). Stops are equally spaced and interpolated by travelled distance. This saved tone changes color only; the route, pressure, material and timing are unchanged.`,
+      color_system: `${colorState} The saved bright/dark allocation changes color only; the route, pressure, material and timing are unchanged.`,
       draw_speed: `This meteor travels through ${signature.speed_profile.length} phases with relative speed weights ${signature.speed_profile.map((value) => value.toFixed(2)).join(" → ")}, derived from per-anchor dwell times. Each phase covers an equal share of the route; a larger weight takes less time.`,
       drawing_duration: timing ? `${m.duration}ms of recorded dwell and average intensity ${m.intensity.toFixed(2)} produce a ${fmtTime(timing.durationMs)} reveal at 1×. Playback speed changes the viewing rate; the original timing remains part of this stroke.` : "",
       turn_system: `The turn budget is ${motion?.turnBudget ?? signature.turn_count}, interpreted by ${family.toLowerCase()} rather than forced into identical corners. Source angle is ${signature.turn_angle_deg.toFixed(0)}°; sharpness ${signature.turn_sharpness.toFixed(2)} determines bounded local rounding. ${MOTION_EFFECTS[pattern]}`,

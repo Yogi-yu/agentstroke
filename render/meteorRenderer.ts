@@ -3,7 +3,7 @@ import type { StrokeStore } from "@/state/strokeStore";
 import type { CanvasTransformState } from "@/store/canvasTransform";
 import { resolveVisualSignature, sampleWidthProfile } from "@/engine/visualSignature";
 import { hashStr } from "@/simulation/rng";
-import { pigmentHsl } from "@/engine/colorTreatment";
+import { createNaturalPigment, pigmentHsl, sampleNaturalPigment } from "@/engine/colorTreatment";
 import { ANIMATED_TRAIL_RETENTION, animatedTrailOpacity, animatedTrailStart, clampTrailRetention } from "@/engine/meteorTrail";
 
 /** A surface adapter may relocate controls without mutating an archived work. */
@@ -377,6 +377,7 @@ export class MeteorRenderer {
     if (cached?.controls === controls && cached.path === path && cached.hue === hue) return cached;
     const signature = resolveVisualSignature(path, hue);
     const config = getBrushMaterialConfig(signature.brush_style);
+    const naturalPigment = signature.color_treatment === "muted" ? createNaturalPigment(path.id, signature.color_count) : null;
     const materialSeed = path.variation_seed ?? path.base_seed ?? hashStr(path.id);
     const { points, length } = sampleMeteorCenterline(controls, this.width, this.height, signature.turn_sharpness);
     const samples: MeteorSample[] = points.map((point, index) => {
@@ -401,16 +402,19 @@ export class MeteorRenderer {
       }, progress, materialSeed);
       const pigmentVariation = (texture.grain - 0.5) * config.sedimentContrast;
       const faceLightness = config.bodyLightness + (1 - texture.pigmentLoad) * 7 + pigmentVariation;
+      const paint = naturalPigment ? sampleNaturalPigment(naturalPigment, progress, texture, signature.brush_style) : {
+        color: pigmentHsl(pigment, signature.brush_style === "calligraphy" ? 68 : 82, faceLightness),
+        core: pigmentHsl(pigment, 61, config.highlightLightness + pigmentVariation * 0.4),
+        rim: pigmentHsl(pigment, 88, config.rimLightness + pigmentVariation * 0.55),
+        groove: pigmentHsl(pigment, 52, config.grooveLightness),
+      };
       return {
         ...point,
         nx: -dy / distance,
         ny: dx / distance,
         pressure,
         texture,
-        color: pigmentHsl(pigment, signature.brush_style === "calligraphy" ? 68 : 82, faceLightness, signature.color_treatment),
-        core: pigmentHsl(pigment, 61, config.highlightLightness + pigmentVariation * 0.4, signature.color_treatment),
-        rim: pigmentHsl(pigment, 88, config.rimLightness + pigmentVariation * 0.55, signature.color_treatment),
-        groove: pigmentHsl(pigment, 52, config.grooveLightness, signature.color_treatment),
+        ...paint,
       };
     });
     const geometry = { controls, path, hue, samples, length, signature };
